@@ -17,7 +17,7 @@ The next picture shows a resume of the IKEv2 implementation, which parameters ar
 
 <p align="center"><img src="images/ePDG_Keys.png" width="100%"></p>
 
-Only the first two messages are unencrypted. After the Diffie-Helman exchange, everything is encrypted and integrity protected with keys derived from this exchange.
+Only the first two messages are unencrypted. After the Diffie-Hellman exchange, everything is encrypted and integrity protected with keys derived from this exchange.
 
 We need to send the NAI and APN information to the ePDG, so that it can request authentication and subscription information from the AAA/HSS for the correct IMSI. This uses the IDi and IDr IKEv2 payload types that are sent in the third message.
 
@@ -29,7 +29,7 @@ This applications supports currently the following RFCs and options:
 - IKEv2 Encryption: AES-CBC-128 and AES-CBC-256 and NULL
 - IKEv2 Pseudo Random Function: PRF-HMAC-MD5, PRF-HMAC-SHA1, PRF-HMAC-SHA2-256, PRF-HMAC-SHA2-384 and PRF-HMAC-SHA2-512
 - IKEv2 Integrity: HMAC-MD5-96, HMAC-SHA1-96, HMAC-SHA2-256-128, HMAC-SHA2-384-192 and HMAC-SHA2-512-256
-- Diffie-Helman Group: 1, 2, 5, 14, 15, 16, 17 and 18 
+- Diffie-Hellman Group: 1, 2, 5, 14, 15, 16, 17 and 18 
 - IPSec Encryption: AES-CBC-128, AES-CBC-256, AES-GCM-8, AES-CGM-12, AES-GCM-16 and NULL
 - No Certificates
 - NAT-T Detection
@@ -122,7 +122,7 @@ Nota: You need to set the MNC and MNC you are using in the code variables.
 
 This is an example output when running the application.
 
-In this case, the first SA_INIT is rejected because the first proposal was not accepted by the ePDG, and altough there were other proposals that matched the ones configured in the ePDG, the KE in the SA_INTI was calculated based on the Diffie-Helman group in the first proposal.
+In this case, the first SA_INIT is rejected because the first proposal was not accepted by the ePDG, and altough there were other proposals that matched the ones configured in the ePDG, the KE in the SA_INTI was calculated based on the Diffie-Hellman group in the first proposal.
 When this happens, the application removes the rejected proposal, and starts again.
 
 
