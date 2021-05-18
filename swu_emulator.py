@@ -2956,11 +2956,11 @@ def get_res_ck_ik(serial_interface, rand, autn):
 
     CLI = []
    
-    CLI.append('AT+CRSM=178,12032,1,4,0\r\n')
-    CLI.append('AT+CSIM=16,"00A40000023F0000"\r\n')
-    CLI.append('AT+CSIM=16,"00A40000022F0000"\r\n')
+    #CLI.append('AT+CRSM=178,12032,1,4,0\r\n')
+    CLI.append('AT+CSIM=14,"00A40000023F00"\r\n')
+    CLI.append('AT+CSIM=14,"00A40000022F00"\r\n')
     CLI.append('AT+CSIM=42,"00A4040010A0000000871002FFFFFFFF8903050001"\r\n')
-    CLI.append('AT+CSIM=80,\"008800812210' + rand.upper() + '10' + autn.upper() + '00\"\r\n')
+    CLI.append('AT+CSIM=78,\"008800812210' + rand.upper() + '10' + autn.upper() + '\"\r\n')
 
     a = time.time()
     for i in CLI:
