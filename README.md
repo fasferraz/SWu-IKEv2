@@ -4,9 +4,9 @@
 This is a SWu client emulator done in python3 that establishes an IKEv2/IPSec tunnel with an ePDG.
 This application implements not only the control plane of SWu (IKEv2) but also the user plane (IPSec).
 
-To interact with a real ePDG you need to get credentials from the USIM to derive the keys needed for EAP-AKA, so once again you need to have a modem that supports the AT commands AT+CRSM and AT-CSIM.
+To interact with a real ePDG you need to get credentials from the USIM to derive the keys needed for EAP-AKA, so once again you need to have a modem that supports the AT command AT+CSIM, or a SmartCard reader.
 
-Note: If no modem is used a default CK, IK and RES will be used (check corresponding variables inside the code)
+Note: If no Modem/SmartCard Reader then a default CK, IK and RES will be used (check corresponding variables inside the code)
 
 SWu is the interface between UE and the ePDG as defined by the 3GPP, and is an IKEv2 based protocol with some minor modifications that can be found in 3GPP 33.402. The IKEv2 control plane is used to perform authentication, session creation and also to negotiate the IPSec sessions parameters to be used at the user plane level.
 
@@ -94,6 +94,8 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from Crypto.Cipher import AES
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from smartcard.System import readers
+from smartcard.util import toHexString,toBytes
 ```
 
 
@@ -106,7 +108,8 @@ Usage: swu_emulator.py [options]
 Options:
   -h, --help            show this help message and exit
   -m MODEM, --modem=MODEM
-                        modem port (i.e. COMX, or /dev/ttyUSBX)
+                        modem port (i.e. COMX, or /dev/ttyUSBX) or smartcard
+                        reader index (0, 1, 2, ...)
   -s SOURCE_ADDR, --source=SOURCE_ADDR
                         IP address of source interface used for IKE/IPSEC
   -d DESTINATION_ADDR, --dest=DESTINATION_ADDR
@@ -114,11 +117,12 @@ Options:
   -a APN, --apn=APN     APN to use
   -g GATEWAY_IP_ADDRESS, --gateway_ip_address=GATEWAY_IP_ADDRESS
                         gateway IP address
+  -I IMSI, --imsi=IMSI  IMSI
+  -M MCC, --mcc=MCC     MCC of ePDG (3 digits)
+  -N MNC, --mnc=MNC     MNC of ePDG (3 digits)
+
 
 ```
-
-Nota: You need to set the MNC and MNC you are using in the code variables.
-
 
 This is an example output when running the application.
 
