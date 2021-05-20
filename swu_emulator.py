@@ -2922,7 +2922,7 @@ def return_imsi(serial_interface_or_reader_index):
         try:
             return get_imsi(serial_interface_or_reader_index)
         except:
-            return None
+            return DEFAULT_IMSI
         
 def return_res_ck_ik(serial_interface_or_reader_index, rand, autn):
     try:
@@ -2931,7 +2931,7 @@ def return_res_ck_ik(serial_interface_or_reader_index, rand, autn):
         try:        
             return get_res_ck_ik(serial_interface_or_reader_index, rand, autn)
         except:
-            return None, None, None
+            return DEFAULT_RES, DEFAULT_CK, DEFAULT_IK
 
 
 
