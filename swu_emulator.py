@@ -3208,17 +3208,21 @@ def main():
     parser = OptionParser()    
     parser.add_option("-m", "--modem", dest="modem", default=DEFAULT_COM, help="modem port (i.e. COMX, or /dev/ttyUSBX) or smartcard reader index (0, 1, 2, ...)")
     parser.add_option("-s", "--source", dest="source_addr",default=get_default_source_address(),help="IP address of source interface used for IKE/IPSEC")
-    parser.add_option("-d", "--dest", dest="destination_addr",default=DEFAULT_SERVER,help="ip address of ePDG") 
+    parser.add_option("-d", "--dest", dest="destination_addr",default=DEFAULT_SERVER,help="ip address or fqdn of ePDG") 
     parser.add_option("-a", "--apn", dest="apn", default=DEFAULT_APN, help="APN to use")    
     parser.add_option("-g", "--gateway_ip_address", dest="gateway_ip_address", help="gateway IP address")    
     parser.add_option("-I", "--imsi", dest="imsi",default=DEFAULT_IMSI,help="IMSI") 
     parser.add_option("-M", "--mcc", dest="mcc",default=DEFAULT_MCC,help="MCC of ePDG (3 digits)") 
     parser.add_option("-N", "--mnc", dest="mnc",default=DEFAULT_MNC,help="MNC of ePDG (3 digits)")     
     (options, args) = parser.parse_args()
-
     
+    try:
+        destination_addr = socket.gethostbyname(options.destination_addr)
+    except:
+        print('Unable to resolve ' + options.destination_addr + '. Exiting.')
+        exit(1)
 
-    a = swu(options.source_addr,options.destination_addr,options.apn,options.modem,options.gateway_ip_address,options.mcc,options.mnc,options.imsi)
+    a = swu(options.source_addr,destination_addr,options.apn,options.modem,options.gateway_ip_address,options.mcc,options.mnc,options.imsi)
 
     if options.imsi == DEFAULT_IMSI: a.get_identity()
     a.set_sa_list(sa_list)
