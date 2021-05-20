@@ -3220,7 +3220,7 @@ def main():
 
     a = swu(options.source_addr,options.destination_addr,options.apn,options.modem,options.gateway_ip_address,options.mcc,options.mnc,options.imsi)
 
-    a.get_identity()
+    if options.imsi == DEFAULT_IMSI: a.get_identity()
     a.set_sa_list(sa_list)
     a.set_sa_list_child(sa_list_child)
     a.set_ts_list(TSI, ts_list_initiator)
