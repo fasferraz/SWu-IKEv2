@@ -108,8 +108,8 @@ Usage: swu_emulator.py [options]
 Options:
   -h, --help            show this help message and exit
   -m MODEM, --modem=MODEM
-                        modem port (i.e. COMX, or /dev/ttyUSBX) or smartcard
-                        reader index (0, 1, 2, ...)
+                        modem port (i.e. COMX, or /dev/ttyUSBX), smartcard
+                        reader index (0, 1, 2, ...), or server for https
   -s SOURCE_ADDR, --source=SOURCE_ADDR
                         IP address of source interface used for IKE/IPSEC
   -d DESTINATION_ADDR, --dest=DESTINATION_ADDR
@@ -402,3 +402,7 @@ But is fully functional, and even with a VM with 2GB RAM you can get decent IPSe
 
 
 
+
+
+# Update:
+- Added support for https retrieval of IMSI or RES, CK and IK (see https://github.com/fasferraz/USIM-https-server)
