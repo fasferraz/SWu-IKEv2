@@ -4,9 +4,9 @@
 This is a SWu client emulator done in python3 that establishes an IKEv2/IPSec tunnel with an ePDG.
 This application implements not only the control plane of SWu (IKEv2) but also the user plane (IPSec).
 
-To interact with a real ePDG you need to get credentials from the USIM to derive the keys needed for EAP-AKA, so once again you need to have a modem that supports the AT command AT+CSIM, or a SmartCard reader.
+To interact with a real ePDG you need to get credentials from the USIM to derive the keys needed for EAP-AKA, so once again you need to have a modem that supports the AT command AT+CSIM, or a SmartCard reader, or even through an https server (see https://github.com/fasferraz/USIM-https-server).
 
-Note: If no Modem/SmartCard Reader then a default CK, IK and RES will be used (check corresponding variables inside the code)
+Note: If no Modem/SmartCard Reader/HTTPS Server then a default CK, IK and RES will be used (check corresponding variables inside the code)
 
 SWu is the interface between UE and the ePDG as defined by the 3GPP, and is an IKEv2 based protocol with some minor modifications that can be found in 3GPP 33.402. The IKEv2 control plane is used to perform authentication, session creation and also to negotiate the IPSec sessions parameters to be used at the user plane level.
 
@@ -43,7 +43,7 @@ https://www.iana.org/assignments/ikev2-parameters/ikev2-parameters.xhtml#ikev2-p
 
 So, how can this application handle the IKEv2 authentication phase defined in 3GPP 33.402?
 
-It needs to run the AKA algorithm in the USIM when receiving a RAND/AUTN from the ePDG in the EAP payload to get the CK and IK from the USIM, since they are needed to calculate the Master Sesssion Key. To accomplish this we need a USB modem that supports the AT Commands +CRSM and +CSIM. 
+It needs to run the AKA algorithm in the USIM when receiving a RAND/AUTN from the ePDG in the EAP payload to get the CK and IK from the USIM, since they are needed to calculate the Master Sesssion Key. To accomplish this we need a USB modem that supports the AT Commands +CSIM, or a Smartcard Reader, or even through an https server. 
 
 In the application we just need to set the COM port. The application can also retrieve the IMSI from the USIM Card using the AT+CIMI command, and build the NAI automatically.
 
