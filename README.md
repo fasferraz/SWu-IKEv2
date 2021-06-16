@@ -8,6 +8,9 @@ To interact with a real ePDG you need to get credentials from the USIM to derive
 
 Note: If no Modem/SmartCard Reader/HTTPS Server then a default CK, IK and RES will be used (check corresponding variables inside the code)
 
+For authentication the application also accepts Ki and OP/OPC for Milenage operation (usefull for testing with developments like open5gs, where the USIM parameters are defined in the HSS/UDR).
+
+
 SWu is the interface between UE and the ePDG as defined by the 3GPP, and is an IKEv2 based protocol with some minor modifications that can be found in 3GPP 33.402. The IKEv2 control plane is used to perform authentication, session creation and also to negotiate the IPSec sessions parameters to be used at the user plane level.
 
 This application can use any network type (Wifi, Fixed, Mobile) to establish an IKEv2 Tunnel towards the ePDG and can be used in a more broader way than just the VoWifi scenario, since any APN can be requested. 
@@ -96,6 +99,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from smartcard.System import readers
 from smartcard.util import toHexString,toBytes
+
+from CryptoMobile.Milenage import Milenage
 ```
 
 
@@ -120,6 +125,9 @@ Options:
   -I IMSI, --imsi=IMSI  IMSI
   -M MCC, --mcc=MCC     MCC of ePDG (3 digits)
   -N MNC, --mnc=MNC     MNC of ePDG (3 digits)
+  -K KI, --ki=KI        ki for Milenage (if not using option -m)
+  -P OP, --op=OP        op for Milenage (if not using option -m)
+  -C OPC, --opc=OPC     opc for Milenage (if not using option -m)
 
 
 ```
