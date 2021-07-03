@@ -134,7 +134,7 @@ Options:
 
 This is an example output when running the application.
 
-In this case, the first SA_INIT is rejected because the first proposal was not accepted by the ePDG, and altough there were other proposals that matched the ones configured in the ePDG, the KE in the SA_INTI was calculated based on the Diffie-Hellman group in the first proposal.
+In this case, the first SA_INIT is rejected because the first proposal was not accepted by the ePDG, and altough there were other proposals that matched the ones configured in the ePDG, the KE in the SA_INIT was calculated based on the Diffie-Hellman group in the first proposal.
 When this happens, the application removes the rejected proposal, and starts again.
 
 
