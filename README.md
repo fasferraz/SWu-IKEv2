@@ -104,6 +104,9 @@ from CryptoMobile.Milenage import Milenage
 ```
 
 
+Note: the smartcard module is the pyscard module found in https://pypi.org/project/pyscard/
+
+
 These are the options currently available when starting the app:
 
 ```
