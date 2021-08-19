@@ -426,7 +426,7 @@ class swu():
         self.check_nat = True
 
         self.set_identification(IDI,ID_RFC822_ADDR,'0' + self.imsi + '@nai.epc.mnc' + self.mnc + '.mcc' + self.mcc + '.3gppnetwork.org')
-        self.set_identification(IDR,ID_FQDN, self.apn + '.apn.epc.mnc' + self.mnc + '.mcc' + self.mcc + '.3gppnetwork.org')
+        self.set_identification(IDR,ID_FQDN, self.apn)
 
         
         self.ike_decoded_header = {}
