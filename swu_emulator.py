@@ -27,6 +27,8 @@ from smartcard.util import toHexString,toBytes
 
 from CryptoMobile.Milenage import Milenage
 
+from card.USIM import *
+
 requests.packages.urllib3.disable_warnings() 
 
 '''
@@ -2972,7 +2974,7 @@ def milenage_res_ck_ik(ki, op, opc, rand):
 
 def return_imsi(serial_interface_or_reader_index):
     try:
-        return read_imsi(serial_interface_or_reader_index)
+        return read_imsi_2(serial_interface_or_reader_index)
     except:
         try:
             return get_imsi(serial_interface_or_reader_index)
@@ -2992,7 +2994,7 @@ def return_res_ck_ik(serial_interface_or_reader_index, rand, autn, ki, op, opc):
             return DEFAULT_RES, DEFAULT_CK, DEFAULT_IK
     else:
         try:
-            return read_res_ck_ik(serial_interface_or_reader_index, rand, autn)
+            return read_res_ck_ik_2(serial_interface_or_reader_index, rand, autn)
         except:
             try:        
                 return get_res_ck_ik(serial_interface_or_reader_index, rand, autn)
@@ -3128,6 +3130,22 @@ def read_res_ck_ik(reader_index, rand, autn):
         ik = result[56:88]          
 
     return res, ck, ik
+
+#reader functions - more generic using card module
+def read_imsi_2(reader_index): #prepared for AUTS
+    a = USIM(int(reader_index))
+    print(a.get_imsi())
+    return a.get_imsi()
+    
+def read_res_ck_ik_2(reader_index,rand,autn):
+    a = USIM(int(reader_index))
+    x = a.authenticate(RAND=toBytes(rand), AUTN=toBytes(autn))
+    if len(x) == 1: #AUTS goes in RES position
+        return toHexString(x[0]).replace(" ", ""), None, None
+    elif len(x) > 2:
+        return toHexString(x[0]).replace(" ", ""),toHexString(x[1]).replace(" ", ""),toHexString(x[2]).replace(" ", "") 
+    else:
+        return None, None, None
 
 
 #https functions
