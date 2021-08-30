@@ -104,8 +104,9 @@ from CryptoMobile.Milenage import Milenage
 ```
 
 
-Note: the smartcard module is the pyscard module found in https://pypi.org/project/pyscard/
+Note 1: The smartcard module is the pyscard module found in https://pypi.org/project/pyscard/
 
+Note 2: I added the card.USIM module (https://github.com/mitshell/card) because it handles much better blank or 3rd party USIM cards than my old USIM interaction functions (AID was hard-coded to my tests USIM, so it could not work with other USIM vendors).
 
 These are the options currently available when starting the app:
 
