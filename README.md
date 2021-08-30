@@ -132,6 +132,8 @@ Options:
   -K KI, --ki=KI        ki for Milenage (if not using option -m)
   -P OP, --op=OP        op for Milenage (if not using option -m)
   -C OPC, --opc=OPC     opc for Milenage (if not using option -m)
+  -n NETNS, --netns=NETNS
+                        Name of network namespace for tun device
 
 
 ```
@@ -267,6 +269,9 @@ Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
 172.16.168.0    0.0.0.0         255.255.255.0   U     102    0        0 ens35
 
 ```
+
+Note: A new option was added to suport Netowrk Namespaces (option -n).
+
 
 To define the proposals and other parameters, you need to follow the examples i have in the code:
 
