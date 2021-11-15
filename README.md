@@ -270,7 +270,7 @@ Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
 
 ```
 
-Note: A new option was added to suport Netowrk Namespaces (option -n).
+Note: A new option was added to suport Network Namespaces (option -n).
 
 
 To define the proposals and other parameters, you need to follow the examples i have in the code:
