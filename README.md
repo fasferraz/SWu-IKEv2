@@ -423,3 +423,17 @@ But is fully functional, and even with a VM with 2GB RAM you can get decent IPSe
 
 # Update:
 - Added support for https retrieval of IMSI or RES, CK and IK (see https://github.com/fasferraz/USIM-https-server)
+
+# Update 2:
+- Output now displays the IKE decrypt table and ESP SA info to add in Wireshark to simplify the decoding of traces.
+
+Example:
+
+IKEv2 DECRYPTION TABLE INFO (Wireshark):
+a3ae69ca51356b5c,f2ad2486dd78b7cc,400f2d3d29e5cb2070a0bddbd488aa87,18db748043497cfdd38fcba7179fcc1a,"AES-CBC-128 [RFC3602]",c222af49e595c6d1c8944bc24511193c9ca4fd99,a70286546da8f8f650739fec7f323250f105de02,"HMAC_SHA1_96 [RFC2404]"
+f2ad2486dd78b7cc,a3ae69ca51356b5c,18db748043497cfdd38fcba7179fcc1a,400f2d3d29e5cb2070a0bddbd488aa87,"AES-CBC-128 [RFC3602]",a70286546da8f8f650739fec7f323250f105de02,c222af49e595c6d1c8944bc24511193c9ca4fd99,"HMAC_SHA1_96 [RFC2404]"
+
+ESP SA INFO (wireshark):
+"IPv4","172.16.62.130","172.16.168.6","0x01004004","AES-CBC [RFC3602]","0x0a9c48ccd8805a629140f0c57617bc8d","HMAC-SHA-1-96 [RFC2404]","0x912d4dbb7fd8decbfae260879ed1fe0dbe5e677b"
+"IPv4","172.16.168.6","172.16.62.130","0x74a229e0","AES-CBC [RFC3602]","0xd076e607fd9dd71025c94b31bffbb3e0","HMAC-SHA-1-96 [RFC2404]","0x4d3abb30c1847c2ff1f86bbf1823068cba93fb1b"
+
