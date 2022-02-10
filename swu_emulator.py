@@ -1388,7 +1388,7 @@ class swu():
             data_to_encrypt = ike_packet[28:]   
      
                       
-            sk_payload = self.encode_generic_payload_header(ike_packet[16],0, data_to_encrypt + b'\x00'*hash_size) #add a dummy hash to calculate correct length    
+            sk_payload = self.encode_generic_payload_header(ike_packet[16],0, data_to_encrypt + b'\x00' + b'\x00'*hash_size) #adds a pad length =0 and a dummy hash to calculate correct length    
             new_ike_packet = ike_packet[0:16] + bytes([SK]) + ike_packet[17:28] + sk_payload        
             new_ike_packet = self.set_ike_packet_length(new_ike_packet)
             new_ike_packet_to_integrity = new_ike_packet[0:-hash_size]           
