@@ -437,3 +437,9 @@ ESP SA INFO (wireshark):
 "IPv4","172.16.62.130","172.16.168.6","0x01004004","AES-CBC [RFC3602]","0x0a9c48ccd8805a629140f0c57617bc8d","HMAC-SHA-1-96 [RFC2404]","0x912d4dbb7fd8decbfae260879ed1fe0dbe5e677b"
 "IPv4","172.16.168.6","172.16.62.130","0x74a229e0","AES-CBC [RFC3602]","0xd076e607fd9dd71025c94b31bffbb3e0","HMAC-SHA-1-96 [RFC2404]","0x4d3abb30c1847c2ff1f86bbf1823068cba93fb1b"
 
+
+# Update 3:
+- To support different IKEv2 ENCR_NULL implementations (an algorithm which by the way, should not be supported according to the IKEv2 RFCs), a new variable was added in the code (self.sk_ENCR_NULL_pad_length):
+   - If the implementation does not expect a PAD LENGTH octet, this variable should be equal to 0. 
+   - If the implementation expects an octet for PAD LENGTH this variable should be equal to 1.
+
