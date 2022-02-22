@@ -608,15 +608,15 @@ class swu():
     
     def return_encryption_algorithm_child_name(self):
         encr_alg = ''
-        if self.negotiated_encryption_algorithm == ENCR_AES_CBC:
+        if self.negotiated_encryption_algorithm_child  == ENCR_AES_CBC:
             encr_alg = "AES-CBC [RFC3602]"
-        elif self.negotiated_encryption_algorithm == ENCR_AES_GCM_8:
+        elif self.negotiated_encryption_algorithm_child  == ENCR_AES_GCM_8:
             encr_alg = "AES-GCM [RFC4106]"
-        elif self.negotiated_encryption_algorithm == ENCR_AES_GCM_12:
+        elif self.negotiated_encryption_algorithm_child  == ENCR_AES_GCM_12:
             encr_alg = "AES-GCM [RFC4106]"
-        elif self.negotiated_encryption_algorithm == ENCR_AES_GCM_16:
+        elif self.negotiated_encryption_algorithm_child  == ENCR_AES_GCM_16:
             encr_alg = "AES-GCM [RFC4106]"            
-        elif self.negotiated_encryption_algorithm == ENCR_NULL:
+        elif self.negotiated_encryption_algorithm_child  == ENCR_NULL:
             encr_alg = "NULL"
         return encr_alg    
     
