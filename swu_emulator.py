@@ -3141,7 +3141,7 @@ def return_auts(rand, autn,ki,op,opc,sqn):
     else:
         op = unhexlify(op)
         m = Milenage(op)
-    macs = m.f1star(ki,rand,sqn,autn[6:8])
+    macs = m.f1star(ki,rand,sqn,b'\x00\x00')
     ak = m.f5star(ki,rand)
     ak_xor_sqn = byte_xor(ak, sqn)
     return  ak_xor_sqn + macs
