@@ -2316,7 +2316,7 @@ class swu():
                                 if RAND is not None and AUTN is not None:
                                     if self.sqn is not None:
                                         auts = return_auts(toHex(RAND), toHex(AUTN),self.ki,self.op,self.opc, self.sqn)
-                                        eap_payload_response = bytes([2]) + bytes([self.eap_identifier]) + fromHex('001817040000040404') + auts
+                                        eap_payload_response = bytes([2]) + bytes([self.eap_identifier]) + fromHex('0018170400000404') + auts
                                         self.eap_payload_response = eap_payload_response
                                         return REPEAT_STATE,'SYNC FAILURE'
 
