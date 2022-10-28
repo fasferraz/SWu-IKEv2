@@ -2314,7 +2314,7 @@ class swu():
                                                      
                             if (RAND is not None and AUTN is not None) or (VECTOR is not None and ENCR_DATA is not None):
                                 if RAND is not None and AUTN is not None:
-                                    if self.sqn is not None:
+                                    if self.sqn is not None and retry == False:
                                         auts = return_auts(toHex(RAND), toHex(AUTN),self.ki,self.op,self.opc, self.sqn)
                                         eap_payload_response = bytes([2]) + bytes([self.eap_identifier]) + fromHex('0018170400000404') + auts
                                         self.eap_payload_response = eap_payload_response
