@@ -748,7 +748,21 @@ class swu():
             self.imsi = imsi
             self.set_identification(IDI,ID_RFC822_ADDR,'0' + self.imsi + '@nai.epc.mnc' + self.mnc + '.mcc' + self.mcc + '.3gppnetwork.org')
     
-       
+    def encode_eap_at_identity(self, identity):
+        """ Returns the EAP AT Identity as bytes """
+        # 4 bytes -> header (type, at_len, identity_len)
+        full_len = 4 + len(identity)
+        at_len = int(full_len / 4)
+        pad = 0
+        if full_len % 4:
+            pad = 4 - (full_len % 4)
+            at_len += 1
+        # 0e -> AT_IDENTITY
+        eap_at_identity = (bytes([0x0e, at_len])
+                + struct.pack('>H', len(identity))
+                + identity.encode("utf-8")
+                + pad * b'\x00')
+        return eap_at_identity
         
     def eap_keys_calculation(self,ck, ik):
         identity = self.identification_initiator[1].encode('utf-8') #idi value
@@ -2421,9 +2435,25 @@ class swu():
                       
                             if i[1][4][0][0] in (AT_ANY_ID_REQ, AT_IDENTITY):
                                 self.eap_identifier = i[1][1]
-                                identity = '0' + self.imsi + '@nai.epc.mnc' + self.mnc + '.mcc' + self.mcc + '.3gppnetwork.org'  # 54 bytes len (0x36)
-                                self.eap_payload_response = bytes([2]) + bytes([self.eap_identifier]) + fromHex('0044170500000e0f0036') + identity.encode('utf-8') + fromHex('0000')
+                                identity = (
+                                        '0'
+                                        + self.imsi
+                                        + '@nai.epc.mnc' + self.mnc
+                                        + '.mcc' + self.mcc
+                                        + '.3gppnetwork.org'
+                                )
+                                self.eap_payload_response = (
+                                        bytes([2])
+                                        + bytes([self.eap_identifier])
+                                        + fromHex("004417050000")
+                                        + self.encode_eap_at_identity(identity))
 
+                                # update the EAP length
+                                eap = bytearray(self.eap_payload_response)
+                                eap_length = struct.pack('>H', len(eap))
+                                eap[2] = eap_length[0]
+                                eap[3] = eap_length[1]
+                                self.eap_payload_response = bytes(eap)
 
                                 return REPEAT_STATE,'EAP IDENTITY REQUESTED'
 
