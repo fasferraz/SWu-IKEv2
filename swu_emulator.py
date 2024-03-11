@@ -2633,13 +2633,16 @@ class swu():
                     if i[1][0] == CFG_REPLY:
                         self.ip_address_list = self.get_cp_attribute_value(i[1][1],INTERNAL_IP4_ADDRESS)
                         self.dns_address_list = self.get_cp_attribute_value(i[1][1],INTERNAL_IP4_DNS)
+                        self.pcscf_address_list = self.get_cp_attribute_value(i[1][1],P_CSCF_IP4_ADDRESS)
                         self.ipv6_address_list = self.get_cp_attribute_value(i[1][1],INTERNAL_IP6_ADDRESS)
                         self.dnsv6_address_list = self.get_cp_attribute_value(i[1][1],INTERNAL_IP6_DNS) 
+                        self.pcscfv6_address_list = self.get_cp_attribute_value(i[1][1],P_CSCF_IP6_ADDRESS)
                         print('IPV4 ADDRESS', self.ip_address_list)
                         print('DNS IPV4 ADDRESS', self.dns_address_list)
+                        print('P-CSCF IPV4 ADDRESS', self.pcscf_address_list)
                         print('IPV6 ADDRESS', self.ipv6_address_list)
                         print('DNS IPV6 ADDRESS', self.dnsv6_address_list)                        
-                        
+                        print('P-CSCF IPV6 ADDRESS', self.pcscfv6_address_list)
                         if self.ip_address_list == [] and self.ipv6_address_list == []:
                             return OTHER_ERROR,'NO IP ADDRESS (IPV4 or IPV6)'                       
                     else:
