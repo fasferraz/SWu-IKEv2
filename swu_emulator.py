@@ -2341,23 +2341,34 @@ class swu():
                                         print('MAC',toHex(MAC))
                                         
                                         res,ck,ik = return_res_ck_ik(self.com_port,toHex(RAND),toHex(AUTN),self.ki,self.op,self.opc)
-                                        print('RES',res)
-                                        print('CK',ck)
-                                        print('IK',ik)
                                         
-                                        self.RES, CK, IK = fromHex(res), fromHex(ck), fromHex(ik)
-                                        self.KENCR, self.KAUT, self.MSK, self.EMSK, self.MK = self.eap_keys_calculation(CK,IK)
-                                        print('KENCR',toHex(self.KENCR))
-                                        print('KAUT',toHex(self.KAUT))
-                                        print('MSK',toHex(self.MSK))
-                                        print('EMSK',toHex(self.EMSK))
+                                        if res is not None and ck is None and ik is None:
+                                            #RES is AUTS
+                                            auts, res = res, None
+                                            print('AUTS', auts)
+                                            eap_payload_response = bytes([2]) + bytes([self.eap_identifier]) + fromHex('0018170400000404') + fromHex(auts)
+                                            self.eap_payload_response = eap_payload_response
+                                            return REPEAT_STATE,'SYNC FAILURE'
+                                            
+                                        else:    
+                                            
+                                            print('RES',res)
+                                            print('CK',ck)
+                                            print('IK',ik)
                                         
-                                        eap_payload_response = bytes([2]) + bytes([self.eap_identifier]) + fromHex('00281701000003030040') + self.RES + fromHex('0b050000' + 16*'00')
+                                            self.RES, CK, IK = fromHex(res), fromHex(ck), fromHex(ik)
+                                            self.KENCR, self.KAUT, self.MSK, self.EMSK, self.MK = self.eap_keys_calculation(CK,IK)
+                                            print('KENCR',toHex(self.KENCR))
+                                            print('KAUT',toHex(self.KAUT))
+                                            print('MSK',toHex(self.MSK))
+                                            print('EMSK',toHex(self.EMSK))
                                         
-                                        h = hmac.HMAC(self.KAUT,hashes.SHA1())
-                                        h.update(eap_payload_response)
-                                        hash = h.finalize()[0:16]  
-                                        self.eap_payload_response = eap_payload_response[:-16] + hash
+                                            eap_payload_response = bytes([2]) + bytes([self.eap_identifier]) + fromHex('00281701000003030040') + self.RES + fromHex('0b050000' + 16*'00')
+                                        
+                                            h = hmac.HMAC(self.KAUT,hashes.SHA1())
+                                            h.update(eap_payload_response)
+                                            hash = h.finalize()[0:16]  
+                                            self.eap_payload_response = eap_payload_response[:-16] + hash
                                     
                                 if VECTOR is not None and ENCR_DATA is not None:                                
                                     print('IV',toHex(VECTOR))
