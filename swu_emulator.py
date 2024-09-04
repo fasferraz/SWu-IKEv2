@@ -1577,9 +1577,9 @@ class swu():
             
             res = 16 - (len(data_to_encrypt) % 16)
             if res>1:
-                data_to_encrypt += b'\x00'*(res-2) + bytes([res-2]) + bytes([packet_type])
+                data_to_encrypt += self.esp_padding(res-2) + bytes([res-2]) + bytes([packet_type])
             else:
-                data_to_encrypt += b'\x00'*(14+res) + bytes([14+res]) + bytes([packet_type])
+                data_to_encrypt += self.esp_padding(14+res) + bytes([14+res]) + bytes([packet_type])
                    
             cipher = Cipher(algorithms.AES(encr_key), modes.CBC(vector))
             encryptor = cipher.encryptor()          
