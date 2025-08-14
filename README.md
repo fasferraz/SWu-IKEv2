@@ -74,33 +74,11 @@ The next picture shows an high-level description of this:
 These are the required modules needed for python3 in order to be able to run the application:
 
 ```
-import serial
-import struct
-import socket
-import random
-import time
-import select
-import sys
-import os
-import fcntl
-import subprocess
-import multiprocessing
-
-from optparse import OptionParser
-from binascii import hexlify, unhexlify
-
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.asymmetric import dh
-from cryptography.hazmat.primitives import hashes, hmac
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
-from Crypto.Cipher import AES
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-from smartcard.System import readers
-from smartcard.util import toHexString,toBytes
-
-from CryptoMobile.Milenage import Milenage
+sudo apt-get install -y \
+    python3-pip \
+    python3-setuptools \
+    python3-pyscard
+pip3 install -r requirements.txt
 ```
 
 
