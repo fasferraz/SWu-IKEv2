@@ -1,8 +1,8 @@
+wheel
 serial
 requests
 cryptography
 pyscard
 pycryptodome
-pycrypto
 git+https://github.com/mitshell/CryptoMobile.git
 git+https://github.com/mitshell/card.git
