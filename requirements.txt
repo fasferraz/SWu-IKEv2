@@ -1,4 +1,5 @@
 wheel
+swig
 serial
 requests
 cryptography
