@@ -74,11 +74,10 @@ The next picture shows an high-level description of this:
 These are the required modules needed for python3 in order to be able to run the application:
 
 ```
-sudo apt-get install --no-install-recommends \
-	python3 \
-	python3-dev \
-	python3-pyscard \
-	python3-pip
+sudo apt-get install -y \
+    python3-pip \
+    python3-setuptools \
+    python3-pyscard
 pip3 install -r requirements.txt
 ```
 
