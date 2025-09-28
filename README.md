@@ -13,8 +13,8 @@ For authentication the application also accepts Ki and OP/OPC for Milenage opera
 
 SWu is the interface between UE and the ePDG as defined by the 3GPP, and is an IKEv2 based protocol with some minor modifications that can be found in 3GPP 33.402. The IKEv2 control plane is used to perform authentication, session creation and also to negotiate the IPSec sessions parameters to be used at the user plane level.
 
-This application can use any network type (Wifi, Fixed, Mobile) to establish an IKEv2 Tunnel towards the ePDG and can be used in a more broader way than just the VoWifi scenario, since any APN can be requested. 
-The applications outputs every single KEY and parameter used in the IKEv2 and IPSec processes, which allow us to decode the corresponding traces in wireshark if needed. 
+This application can use any network type (Wifi, Fixed, Mobile) to establish an IKEv2 Tunnel towards the ePDG and can be used in a more broader way than just the VoWifi scenario, since any APN can be requested.
+The applications outputs every single KEY and parameter used in the IKEv2 and IPSec processes, which allow us to decode the corresponding traces in wireshark if needed.
 
 The next picture shows a resume of the IKEv2 implementation, which parameters are sent in each message, and how the different keys are generated and used:
 
@@ -32,7 +32,7 @@ This applications supports currently the following RFCs and options:
 - IKEv2 Encryption: AES-CBC-128 and AES-CBC-256 and NULL
 - IKEv2 Pseudo Random Function: PRF-HMAC-MD5, PRF-HMAC-SHA1, PRF-HMAC-SHA2-256, PRF-HMAC-SHA2-384 and PRF-HMAC-SHA2-512
 - IKEv2 Integrity: HMAC-MD5-96, HMAC-SHA1-96, HMAC-SHA2-256-128, HMAC-SHA2-384-192 and HMAC-SHA2-512-256
-- Diffie-Hellman Group: 1, 2, 5, 14, 15, 16, 17 and 18 
+- Diffie-Hellman Group: 1, 2, 5, 14, 15, 16, 17 and 18
 - IPSec Encryption: AES-CBC-128, AES-CBC-256, AES-GCM-8, AES-CGM-12, AES-GCM-16 and NULL
 - No Certificates
 - NAT-T Detection
@@ -46,7 +46,7 @@ https://www.iana.org/assignments/ikev2-parameters/ikev2-parameters.xhtml#ikev2-p
 
 So, how can this application handle the IKEv2 authentication phase defined in 3GPP 33.402?
 
-It needs to run the AKA algorithm in the USIM when receiving a RAND/AUTN from the ePDG in the EAP payload to get the CK and IK from the USIM, since they are needed to calculate the Master Sesssion Key. To accomplish this we need a USB modem that supports the AT Commands +CSIM, or a Smartcard Reader, or even through an https server. 
+It needs to run the AKA algorithm in the USIM when receiving a RAND/AUTN from the ePDG in the EAP payload to get the CK and IK from the USIM, since they are needed to calculate the Master Sesssion Key. To accomplish this we need a USB modem that supports the AT Commands +CSIM, or a Smartcard Reader, or even through an https server.
 
 In the application we just need to set the COM port. The application can also retrieve the IMSI from the USIM Card using the AT+CIMI command, and build the NAI automatically.
 
@@ -58,7 +58,7 @@ The next picture shows a typical flow of activating a session through non-3GPP a
 The application has 3 distinct processes:
 - Main process that handles the IKEv2 flow states
 - After establishing the SA Childs for IPSec two additional processes are created to handle the IPSec Encryption/Decryption:
-- IPSec Encoder: 
+- IPSec Encoder:
     - Gets user data from tunnel interface, encrypts and sends it to ePDG
     - Receives info from main process to create/update/delete SA Child
 - IPSec Decoder:
@@ -81,10 +81,17 @@ sudo apt-get install -y \
 pip3 install -r requirements.txt
 ```
 
+(Alternatively, see the [install_deps.sh](install_deps.sh) script which does all of the required steps - tested on Ubuntu 22.04 LTS.)
+
 
 Note 1: The smartcard module is the pyscard module found in https://pypi.org/project/pyscard/
 
 Note 2: I added the card.USIM module (https://github.com/mitshell/card) because it handles much better blank or 3rd party USIM cards than my old USIM interaction functions (AID was hard-coded to my tests USIM, so it could not work with other USIM vendors).
+
+Note 3: When running, since this would open port 500 (<1024) and also open a raw socket for ESP, you need to either:
+- run it as root;
+- or give the capabilities `cap_net_bind_service,cap_net_raw=+ep` to the python3 binary.
+
 
 These are the options currently available when starting the app:
 
@@ -226,7 +233,7 @@ BEFORE:
 # route -n
 Kernel IP routing table
 Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
-0.0.0.0         172.16.62.2     0.0.0.0         UG    20100  0        0 ens33    <- Current default route    
+0.0.0.0         172.16.62.2     0.0.0.0         UG    20100  0        0 ens33    <- Current default route
 172.16.62.0     0.0.0.0         255.255.255.0   U     100    0        0 ens33
 172.16.63.0     0.0.0.0         255.255.255.0   U     101    0        0 ens34
 172.16.168.0    0.0.0.0         255.255.255.0   U     102    0        0 ens35
@@ -255,7 +262,7 @@ To define the proposals and other parameters, you need to follow the examples i 
 
 ```
 
-    #################################################################################################################    
+    #################################################################################################################
     #####
     #####   SA Structure:
     #####   ------------
@@ -271,7 +278,7 @@ To define the proposals and other parameters, you need to follow the examples i 
     #################################################################################################################
 
 
-    #################################################################################################################    
+    #################################################################################################################
     #####
     #####   TS Structure:
     #####   ------------
@@ -283,7 +290,7 @@ To define the proposals and other parameters, you need to follow the examples i 
     #################################################################################################################
 
 
-    #################################################################################################################    
+    #################################################################################################################
     #####
     #####   CP Structure:
     #####   ------------
@@ -296,7 +303,7 @@ To define the proposals and other parameters, you need to follow the examples i 
 
 
     cp_list = [
-        CFG_REQUEST, 
+        CFG_REQUEST,
         [INTERNAL_IP4_ADDRESS],
         [INTERNAL_IP4_DNS],
         [INTERNAL_IP6_ADDRESS],
@@ -312,7 +319,7 @@ To define the proposals and other parameters, you need to follow the examples i 
 
     ts_list_responder = [
         [TS_IPV4_ADDR_RANGE,ANY,0,65535,'0.0.0.0','255.255.255.255'],
-        [TS_IPV6_ADDR_RANGE,ANY,0,65535,'::','ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff']        
+        [TS_IPV6_ADDR_RANGE,ANY,0,65535,'::','ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff']
     ]
 
 
@@ -322,24 +329,24 @@ To define the proposals and other parameters, you need to follow the examples i 
        [ENCR,ENCR_NULL],
        [PRF,PRF_HMAC_MD5],
        [INTEG,AUTH_HMAC_MD5_96],
-       [D_H,MODP_768_bit] 
+       [D_H,MODP_768_bit]
     ]    ,
     [
        [IKE,0],
        [ENCR,ENCR_AES_CBC,[KEY_LENGTH,128]],
        [PRF,PRF_HMAC_SHA1],
        [INTEG,AUTH_HMAC_SHA1_96],
-       [D_H,MODP_2048_bit] 
+       [D_H,MODP_2048_bit]
     ]    ,
-    
+
     [
        [IKE,0],
        [ENCR,ENCR_AES_CBC,[KEY_LENGTH,128]],
        [PRF,PRF_HMAC_SHA1],
        [INTEG,AUTH_HMAC_SHA1_96],
-       [D_H,MODP_1024_bit]  
+       [D_H,MODP_1024_bit]
     ]
-  
+
     ]
 
 
@@ -385,7 +392,7 @@ To define the proposals and other parameters, you need to follow the examples i 
         [ENCR,ENCR_AES_CBC,[KEY_LENGTH,256]],
         [INTEG,AUTH_HMAC_SHA1_96],
         [ESN,ESN_NO_ESN]
-    ]     
+    ]
     ]
 ```
 
@@ -418,6 +425,6 @@ ESP SA INFO (wireshark):
 
 # Update 3:
 - To support different IKEv2 ENCR_NULL implementations (an algorithm which by the way, should not be supported according to the IKEv2 RFCs), a new variable was added in the code (self.sk_ENCR_NULL_pad_length):
-   - If the implementation does not expect a PAD LENGTH octet, this variable should be equal to 0. 
+   - If the implementation does not expect a PAD LENGTH octet, this variable should be equal to 0.
    - If the implementation expects an octet for PAD LENGTH this variable should be equal to 1.
 
