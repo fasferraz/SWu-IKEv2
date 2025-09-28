@@ -4,7 +4,7 @@
 set -ueo pipefail
 
 
-echo -e "\n\n >> Installing depending libraries...\n\n"
+echo -e "\n\n >> Installing dependent libraries...\n\n"
 # libpcsclite required by pyscard; the rest are useful for testing with physical smart cards
 sudo apt install -y libpcsclite-dev pcscd pcsc-tools
 
