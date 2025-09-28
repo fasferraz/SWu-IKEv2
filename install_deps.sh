@@ -4,17 +4,13 @@
 set -ueo pipefail
 
 
-<<<<<<< HEAD
-echo -e "\n\n >> Installing dependent libraries...\n\n"
-=======
 echo -e "\n\n >> Installing python3 tools...\n\n"
 sudo apt install -y \
     python3-pip \
     python3-setuptools \
     python3-pyscard
 
-echo -e "\n\n >> Installing depending libraries...\n\n"
->>>>>>> f88e926 (included previous requirements, which I might've missed and improved the README.md)
+echo -e "\n\n >> Installing dependent libraries...\n\n"
 # libpcsclite required by pyscard; the rest are useful for testing with physical smart cards
 sudo apt install -y \
     libpcsclite-dev \
