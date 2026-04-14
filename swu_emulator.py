@@ -75,6 +75,9 @@ DEFAULT_IK = '0123456789ABCDEF0123456789ABCDEF'
 DEFAULT_RES = '0123456789ABCDEF'
 
 
+# IMEI (15 digits) and IMEISV (16 digits) - used in DEVICE_IDENTITY notify response
+IMEI                                    = '123456789012347'   # 15 digits. The last digit (7) is the checksum digit.
+IMEISV                                  = '1234567890123456'  # 16 digits
 
 
 NONE = 0
@@ -433,6 +436,8 @@ class swu():
         self.next_reauth_id = None
         
         self.check_nat = True
+        self.device_identity_requested = False
+        self.device_identity_type = None
 
         self.set_identification(IDI,ID_RFC822_ADDR,'0' + self.imsi + '@nai.epc.mnc' + self.mnc + '.mcc' + self.mcc + '.3gppnetwork.org')
 #       self.set_identification(IDR,ID_FQDN, self.apn + '.apn.epc.mnc' + self.mnc + '.mcc' + self.mcc + '.3gppnetwork.org')
@@ -1399,8 +1404,31 @@ class swu():
     def encode_payload_type_n(self,protocol,spi,notify_message_type,notification_data= b''):
         spi_size = len(spi)
         return bytes([protocol]) + bytes([spi_size]) + struct.pack("!H",notify_message_type) + spi + notification_data
-        
- 
+
+
+    def encode_device_identity_notification_data(self):
+        """ Encodes the DEVICE_IDENTITY notification data.
+        Format: [2 bytes length][1 byte identity type][BCD encoded IMEI/IMEISV]
+        Identity type 0x01 = IMEI (15 digits, padded with F to 16)
+        Identity type 0x02 = IMEISV (16 digits)
+        """
+        if self.device_identity_type == 0x02:
+            identity_type = 0x02
+            digits = IMEISV
+        else:  # 0x01 or fallback
+            identity_type = 0x01
+            digits = IMEI + 'F'  # pad 15-digit IMEI to 16 chars with trailing F
+
+        bcd = b''
+        for i in range(0, len(digits), 2):
+            low_nibble  = int(digits[i],   16)
+            high_nibble = int(digits[i+1], 16)
+            bcd += bytes([low_nibble | (high_nibble << 4)])
+
+        data = bytes([identity_type]) + bcd
+        return struct.pack("!H", len(data)) + data
+
+
     def encode_payload_type_sk(self,ike_packet):
 
         hash_size = self.integ_key_truncated_len_bytes.get(self.negotiated_integrity_algorithm)
@@ -2124,19 +2152,24 @@ class swu():
 
 
     def create_IKE_AUTH_2(self):
-        header = self.encode_header(self.ike_spi_initiator, self.ike_spi_responder, EAP, 2, 0, IKE_AUTH, (0,0,1), self.message_id_request)        
-        payload = self.encode_generic_payload_header(NONE,0,self.encode_payload_type_eap())        
-        packet = self.set_ike_packet_length(header+payload)        
-        
-        encrypted_and_integrity_packet = self.encode_payload_type_sk(packet)                       
+        header = self.encode_header(self.ike_spi_initiator, self.ike_spi_responder, EAP, 2, 0, IKE_AUTH, (0,0,1), self.message_id_request)
+        if self.device_identity_requested:
+            payload  = self.encode_generic_payload_header(N,0,self.encode_payload_type_eap())
+            payload += self.encode_generic_payload_header(NONE,0,self.encode_payload_type_n(RESERVED,b'',DEVICE_IDENTITY,self.encode_device_identity_notification_data()))
+            self.device_identity_requested = False
+        else:
+            payload = self.encode_generic_payload_header(NONE,0,self.encode_payload_type_eap())
+        packet = self.set_ike_packet_length(header+payload)
+
+        encrypted_and_integrity_packet = self.encode_payload_type_sk(packet)
         return encrypted_and_integrity_packet
-        
+
     def create_IKE_AUTH_3(self):
-        header = self.encode_header(self.ike_spi_initiator, self.ike_spi_responder, AUTH, 2, 0, IKE_AUTH, (0,0,1), self.message_id_request)        
-        payload = self.encode_generic_payload_header(NONE,0,self.encode_payload_type_auth(SHARED_KEY_MESSAGE_INTEGRITY_CODE))        
-        packet = self.set_ike_packet_length(header+payload)        
-        
-        encrypted_and_integrity_packet = self.encode_payload_type_sk(packet)                       
+        header = self.encode_header(self.ike_spi_initiator, self.ike_spi_responder, AUTH, 2, 0, IKE_AUTH, (0,0,1), self.message_id_request)
+        payload = self.encode_generic_payload_header(NONE,0,self.encode_payload_type_auth(SHARED_KEY_MESSAGE_INTEGRITY_CODE))
+        packet = self.set_ike_packet_length(header+payload)
+
+        encrypted_and_integrity_packet = self.encode_payload_type_sk(packet)
         return encrypted_and_integrity_packet
         
 
@@ -2358,8 +2391,8 @@ class swu():
                 
                 if i[0] == N:    #protocol_id, notify_message_type, spi, notification_data
                     if i[1][1] == DEVICE_IDENTITY:
-                        pass
-                        #add imei in next auth
+                        self.device_identity_requested = True
+                        self.device_identity_type = i[1][3][-1] if i[1][3] else None
                         
                     elif i[1][1]<16384: #error
                         return OTHER_ERROR,str(i[1][1])
