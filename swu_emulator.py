@@ -3642,5 +3642,7 @@ def main():
     
     
 if __name__ == "__main__":
+    if os.name == 'posix' and sys.platform != 'darwin':
+        multiprocessing.set_start_method("fork")
     main()
     
