@@ -1,1 +1,7 @@
 .venv
+__pycache__/
+wireshark_keys/
+docs/superpowers/
+swu.lab.yaml
+swu.local.yaml
+

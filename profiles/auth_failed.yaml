@@ -1,0 +1,11 @@
+# Provoke AUTHENTICATION_FAILED / EAP Failure: Ki last byte flipped vs swu.yaml.
+# Expect: event=failed reason=EAP_FAILURE or event=failed notify=AUTHENTICATION_FAILED code=24
+# Quote IMSI / Ki / OP so leading zeros survive YAML.
+dest: 192.168.64.1
+imsi: "001011234567890"
+ki: "000102030405060708090a0b0c0d0e00"
+op: "00112233445566778899aabbccddeeff"
+no_default_route: true
+no_dns: true
+headless: true
+log_level: warning

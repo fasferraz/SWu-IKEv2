@@ -1,0 +1,12 @@
+# Provoke 3GPP 24.302 ILLEGAL_ME / IMEI_NOT_ACCEPTED: IMEI is 15 zeros.
+# Expect: event=failed notify=ILLEGAL_ME code=9006 or notify=IMEI_NOT_ACCEPTED code=11005
+# Quote IMSI / Ki / OP / IMEI so leading zeros survive YAML.
+dest: 192.168.64.1
+imsi: "001011234567890"
+ki: "000102030405060708090a0b0c0d0e0f"
+op: "00112233445566778899aabbccddeeff"
+imei: "000000000000000"
+no_default_route: true
+no_dns: true
+headless: true
+log_level: warning

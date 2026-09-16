@@ -1,0 +1,11 @@
+# Provoke 3GPP 24.302 USER_UNKNOWN: IMSI is not the swu.yaml subscriber.
+# Expect: event=failed notify=USER_UNKNOWN code=9001 (or AUTHENTICATION_FAILED if the ePDG collapses it).
+# Quote IMSI / Ki / OP so leading zeros survive YAML.
+dest: 192.168.64.1
+imsi: "001019999999999"
+ki: "000102030405060708090a0b0c0d0e0f"
+op: "00112233445566778899aabbccddeeff"
+no_default_route: true
+no_dns: true
+headless: true
+log_level: warning

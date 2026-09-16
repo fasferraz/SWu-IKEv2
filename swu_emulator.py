@@ -1,35 +1,123 @@
-import serial
+import argparse
+import copy
+import logging
 import struct
 import socket
 import random
-import time
 import select
+import signal
 import sys
 import os
 import fcntl
 import subprocess
 import multiprocessing
-import requests
+import time
+import warnings
 
-from optparse import OptionParser
 from binascii import hexlify, unhexlify
 
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.asymmetric import dh
+from cryptography.hazmat.primitives.asymmetric import dh, ec
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.utils import CryptographyDeprecationWarning
 
 from Crypto.Cipher import AES
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from smartcard.System import readers
-from smartcard.util import toHexString,toBytes
+from usim_aka import return_auts, return_imsi, return_res_ck_ik
+from ikev2_const import *
+from swu_config import (
+    apply_file_config,
+    argparse_defaults,
+    filter_ike_sa_by_dh,
+    format_connected_event,
+    format_ike_event,
+    format_ipv6_host,
+    normalize_log_level,
+    resolve_dpd_seconds,
+    resolve_keepalive_seconds,
+    resolve_reconnect_attempts,
+    validate_aka_credentials,
+    validate_device_identity,
+)
 
-from CryptoMobile.Milenage import Milenage
+log = logging.getLogger('swu')
 
-from card.USIM import *
+# cryptography warns on FFDH; MODP stays in the IKE offer list.
+warnings.filterwarnings(
+    'ignore',
+    category=CryptographyDeprecationWarning,
+    message=r'Diffie-Hellman over finite fields \(FFDH\) is deprecated.*',
+)
 
-requests.packages.urllib3.disable_warnings() 
+ECDH_CURVES = {
+    ECP_256_bit: ec.SECP256R1(),
+    ECP_384_bit: ec.SECP384R1(),
+    ECP_521_bit: ec.SECP521R1(),
+}
+
+
+def ecdh_field_len(curve):
+    return (curve.key_size + 7) // 8
+
+
+def ecdh_encode_public(public_key):
+    nums = public_key.public_numbers()
+    size = ecdh_field_len(nums.curve)
+    return nums.x.to_bytes(size, 'big') + nums.y.to_bytes(size, 'big')
+
+
+def ecdh_decode_public(curve, data):
+    size = ecdh_field_len(curve)
+    if len(data) != 2 * size:
+        raise ValueError('ECDH public key length must be %s, got %s' % (2 * size, len(data)))
+    x = int.from_bytes(data[:size], 'big')
+    y = int.from_bytes(data[size:], 'big')
+    return ec.EllipticCurvePublicNumbers(x, y, curve).public_key()
+
+
+def print(*args, **_kwargs):
+    log.info('%s', ' '.join(str(arg) for arg in args))
+
+
+def setup_logging(level_name):
+    level = getattr(logging, normalize_log_level(level_name).upper())
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(level=level, format='%(message)s', stream=sys.stdout)
+    else:
+        root.setLevel(level)
+    log.setLevel(level)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description='IKEv2/IPSec SWu client')
+    parser.add_argument('-m', '--modem', dest='modem', default=DEFAULT_COM, help='modem port (i.e. COMX, or /dev/ttyUSBX), smartcard reader index (0, 1, 2, ...), or server for https')
+    parser.add_argument('-s', '--source', dest='source_addr', default=get_default_source_address(), help='IP address of source interface used for IKE/IPSEC')
+    parser.add_argument('-d', '--dest', dest='destination_addr', default=DEFAULT_SERVER, help='ip address or fqdn of ePDG')
+    parser.add_argument('-a', '--apn', dest='apn', default=DEFAULT_APN, help='APN to use')
+    parser.add_argument('-g', '--gateway_ip_address', dest='gateway_ip_address', help='gateway IP address')
+    parser.add_argument('-I', '--imsi', dest='imsi', help='IMSI')
+    parser.add_argument('-M', '--mcc', dest='mcc', default=DEFAULT_MCC, help='MCC for IDi NAI (USIM, 3 digits)')
+    parser.add_argument('-N', '--mnc', dest='mnc', default=DEFAULT_MNC, help='MNC for IDi NAI (USIM, 3 digits)')
+    parser.add_argument('-K', '--ki', dest='ki', help='ki for Milenage (if not using option -m)')
+    parser.add_argument('-P', '--op', dest='op', help='op for Milenage (if not using option -m)')
+    parser.add_argument('-C', '--opc', dest='opc', help='opc for Milenage (if not using option -m)')
+    parser.add_argument('-n', '--netns', dest='netns', help='Name of network namespace for tun device')
+    parser.add_argument('-S', '--sqn', dest='sqn', help='SQN (6 hex bytes)')
+    parser.add_argument('--no-default-route', dest='no_default_route', action='store_true', default=False, help='Do not replace the host default route with the tunnel')
+    parser.add_argument('--no-dns', dest='no_dns', action='store_true', default=False, help='Do not overwrite /etc/resolv.conf')
+    parser.add_argument('--export-keys', dest='export_keys', help='Directory for Wireshark IKE/ESP key files')
+    parser.add_argument('--headless', dest='headless', action='store_true', default=False, help='Stay CONNECTED without reading keyboard (q/i/c/r). SIGINT/SIGTERM tear down the tunnel')
+    parser.add_argument('--imei', dest='imei', help='IMEI (15 digits) for DEVICE_IDENTITY')
+    parser.add_argument('--imeisv', dest='imeisv', help='IMEISV (16 digits) for DEVICE_IDENTITY')
+    parser.add_argument('--config', dest='config', help='YAML file for CLI options plus ike_sa / child_sa / ts_* / cp (CLI wins on options)')
+    parser.add_argument('--log-level', dest='log_level', default='info', choices=sorted(('debug', 'info', 'warning', 'error')), help='Logging level (default: info). Hex dumps are info; event=connected and event=failed/retry are always printed')
+    parser.add_argument('--dpd', dest='dpd', type=int, default=None, help='Liveness INFORMATIONAL interval in seconds (0=off). Default 30, or TIMEOUT_PERIOD_FOR_LIVENESS_CHECK if the ePDG sends it')
+    parser.add_argument('--keepalive', dest='keepalive', type=int, default=None, help='NAT-T 0xFF keepalive interval in seconds when NAT is detected (0=off, default 20)')
+    parser.add_argument('--reconnect', dest='reconnect', type=int, default=None, help='Times to restart IKE after peer DELETE or liveness timeout (0=off, default 0)')
+    return parser
 
 '''
 
@@ -55,340 +143,9 @@ INTER_PROCESS_IE_SPI_RESP    = 6
 INTER_PROCESS_IE_IKE_MESSAGE = 7
 
 
-#DEFAULTs
-
-DEFAULT_IKE_PORT = 500
-DEFAULT_IKE_NAT_TRAVERSAL_PORT = 4500
-
-DEFAULT_SERVER = '1.2.3.4'
-
-DEFAULT_COM = '/dev/ttyUSB2'
-DEFAULT_IMSI = '123456012345678'
-DEFAULT_MCC = '123'
-DEFAULT_MNC = '456'
-DEFAULT_APN = 'internet'
-DEFAULT_TIMEOUT_UDP = 2
-#DEFAULT_TIMEOUT_UDP_NAT_TRANSVERSAL = 2
-
-DEFAULT_CK = '0123456789ABCDEF0123456789ABCDEF'
-DEFAULT_IK = '0123456789ABCDEF0123456789ABCDEF'
-DEFAULT_RES = '0123456789ABCDEF'
-
-
-# IMEI (15 digits) and IMEISV (16 digits) - used in DEVICE_IDENTITY notify response
-IMEI                                    = '123456789012347'   # 15 digits. The last digit (7) is the checksum digit.
-IMEISV                                  = '1234567890123456'  # 16 digits
-
-
-NONE = 0
-
-#IKEv2 Payload Types
-SA =      33
-KE =      34
-IDI =     35
-IDR =     36 
-CERT =    37
-CERTREQ = 38
-AUTH =    39
-NINR =    40
-N =       41
-D =       42
-V =       43
-TSI =     44
-TSR =     45
-SK =      46
-CP =      47 
-EAP =     48
-
-#IKEv2 Exchange Types
-IKE_SA_INIT =     34
-IKE_AUTH =        35
-CREATE_CHILD_SA = 36
-INFORMATIONAL =   37
-
-RESERVED = 0
-IKE = 1
-AH =  2
-ESP = 3   
-
-#Transform Type Values
-ENCR = 1
-PRF = 2
-INTEG = 3
-D_H = 4
-ESN = 5
-
-
-#Transform Type 1 - Encryption Algorithm Transform IDs
-ENCR_DES_IV64 =    1
-ENCR_DES=          2
-ENCR_3DES =        3
-ENCR_RC5 =         4
-ENCR_IDEA =        5
-ENCR_CAST =        6
-ENCR_BLOWFISH =    7
-ENCR_3IDEA =       8
-ENCR_DES_IV32 =    9
-ENCR_NULL =       11 #Not allowed
-ENCR_AES_CBC =    12
-ENCR_AES_CTR =    13
-ENCR_AES_CCM_8 =  14
-ENCR_AES_CCM_12 = 15
-ENCR_AES_CCM_16 = 16
-ENCR_AES_GCM_8 =  18
-ENCR_AES_GCM_12 = 19
-ENCR_AES_GCM_16 = 20
-
-#Transform Type 2 - Pseudorandom Function Transform IDs
-PRF_HMAC_MD5 =          1
-PRF_HMAC_SHA1 =         2
-PRF_HMAC_TIGER =        3
-PRF_AES128_XCBC =       4
-PRF_HMAC_SHA2_256 =     5
-PRF_HMAC_SHA2_384 =     6
-PRF_HMAC_SHA2_512 =     7
-PRF_AES128_CMAC =       8
-
-#Transform Type 3 - Integrity Algorithm Transform IDs
-NONE =                      0
-AUTH_HMAC_MD5_96 =	        1
-AUTH_HMAC_SHA1_96 =         2
-AUTH_DES_MAC =	            3
-AUTH_KPDK_MD5 =             4
-AUTH_AES_XCBC_96 =          5
-AUTH_HMAC_MD5_128 =         6
-AUTH_HMAC_SHA1_160 =        7
-AUTH_AES_CMAC_96 =          8
-AUTH_AES_128_GMAC =         9
-AUTH_AES_192_GMAC =        10
-AUTH_AES_256_GMAC =        11
-AUTH_HMAC_SHA2_256_128 =   12
-AUTH_HMAC_SHA2_384_192 =   13
-AUTH_HMAC_SHA2_512_256 =   14
-
-#Transform Type 4 - Diffie-Hellman Group Transform IDs
-MODP_768_bit =          1
-MODP_1024_bit =         2
-MODP_1536_bit =         5
-MODP_2048_bit =        14
-MODP_3072_bit =        15
-MODP_4096_bit =        16
-MODP_6144_bit =        17
-MODP_8192_bit =        18
-
-
-ESN_NO_ESN = 0
-ESN_ESN =    1
-
-TLV = 0
-TV =  1
-
-#IKEv2 Transform Attribute Types
-KEY_LENGTH = (14, TV)
-
-
-#states
-OK =                            0
-TIMEOUT =                       1
-REPEAT_STATE =                  2
-DECODING_ERROR =                3
-MANDATORY_INFORMATION_MISSING = 4
-OTHER_ERROR =                   5
-REPEAT_STATE_COOKIE =           6
-
-
-#IKEv2 Notify Message Types - Error Types
-UNSUPPORTED_CRITICAL_PAYLOAD            =     1
-INVALID_IKE_SPI                         =     4
-INVALID_MAJOR_VERSION                   =     5
-INVALID_SYNTAX                          =     7
-INVALID_MESSAGE_ID                      =     9
-INVALID_SPI                             =    11
-NO_PROPOSAL_CHOSEN                      =    14
-INVALID_KE_PAYLOAD                      =    17
-AUTHENTICATION_FAILED                   =    24
-SINGLE_PAIR_REQUIRED                    =    34
-NO_ADDITIONAL_SAS                       =    35
-INTERNAL_ADDRESS_FAILURE                =    36
-FAILED_CP_REQUIRED                      =    37
-TS_UNACCEPTABLE                         =    38
-INVALID_SELECTORS                       =    39
-TEMPORARY_FAILURE                       =    43
-CHILD_SA_NOT_FOUND                      =    44
-# from 24.302                                        
-PDN_CONNECTION_REJECTION                =  8192
-MAX_CONNECTION_REACHED                  =  8193
-SEMANTIC_ERROR_IN_THE_TFT_OPERATION     =  8241
-SYNTACTICAL_ERROR_IN_THE_TFT_OPERATION  =  8242
-SEMANTIC_ERRORS_IN_PACKET_FILTERS       =  8244
-SYNTACTICAL_ERRORS_IN_PACKET_FILTERS    =  8245
-NON_3GPP_ACCESS_TO_EPC_NOT_ALLOWED      =  9000
-USER_UNKNOWN                            =  9001
-NO_APN_SUBSCRIPTION                     =  9002
-AUTHORIZATION_REJECTED                  =  9003
-ILLEGAL_ME                              =  9006
-NETWORK_FAILURE                         = 10500
-RAT_TYPE_NOT_ALLOWED                    = 11001
-IMEI_NOT_ACCEPTED                       = 11005
-PLMN_NOT_ALLOWED                        = 11011
-UNAUTHENTICATED_EMERGENCY_NOT_SUPPORTED = 11055
-
-#IKEv2 Notify Message Types - Status Types
-INITIAL_CONTACT                         = 16384
-SET_WINDOW_SIZE                         = 16385
-ADDITIONAL_TS_POSSIBLE                  = 16386
-IPCOMP_SUPPORTED                        = 16387      
-NAT_DETECTION_SOURCE_IP                 = 16388      
-NAT_DETECTION_DESTINATION_IP            = 16389
-COOKIE                                  = 16390
-USE_TRANSPORT_MODE                      = 16391
-HTTP_CERT_LOOKUP_SUPPORTED              = 16392
-REKEY_SA                                = 16393
-ESP_TFC_PADDING_NOT_SUPPORTED           = 16394
-NON_FIRST_FRAGMENTS_ALSO                = 16395
-
-EAP_ONLY_AUTHENTICATION                 = 16417
-# from 24.302                                        
-REACTIVATION_REQUESTED_CAUSE            = 40961
-BACKOFF_TIMER                           = 41041
-PDN_TYPE_IPv4_ONLY_ALLOWED              = 41050
-PDN_TYPE_IPv6_ONLY_ALLOWED              = 41051
-DEVICE_IDENTITY                         = 41101
-EMERGENCY_SUPPORT                       = 41112
-EMERGENCY_CALL_NUMBERS                  = 41134
-NBIFOM_GENERIC_CONTAINER                = 41288
-P_CSCF_RESELECTION_SUPPORT              = 41304
-PTI                                     = 41501
-IKEV2_MULTIPLE_BEARER_PDN_CONNECTIVITY  = 42011
-EPS_QOS                                 = 42014
-EXTENDED_EPS_QOS                        = 42015
-TFT                                     = 42017
-MODIFIED_BEARER                         = 42020
-APN_AMBR                                = 42094
-EXTENDED_APN_AMBR                       = 42095
-N1_MODE_CAPABILITY                      = 51015
-
-#IKEv2 Authenticaton Method
-RSA_DIGITAL_SIGNATURE             = 1
-SHARED_KEY_MESSAGE_INTEGRITY_CODE = 2
-DSS_DIGITAL_SIGNATURE             = 3
-
-#IKEv2 Traffic Selector Types
-TS_IPV4_ADDR_RANGE = 7
-TS_IPV6_ADDR_RANGE = 8
-
-#IP protocol_id
-ANY =   0
-TCP =   6
-UDP =  17
-ICMP =  1
-ESP_PROTOCOL = 50
-
-NAT_TRAVERSAL = 4500
-
-#IKEv2 Configuration Payload CFG Types
-CFG_REQUEST =       1
-CFG_REPLY =         2
-CFG_SET =           3
-CFG_ACK =           4
-
-# IKEv2 Configuration Payload Attribute Types (num, length) None = more
-INTERNAL_IP4_ADDRESS	           = 1
-INTERNAL_IP4_NETMASK	           = 2
-INTERNAL_IP4_DNS	               = 3
-INTERNAL_IP4_NBNS	               = 4
-INTERNAL_IP4_DHCP		           = 6
-APPLICATION_VERSION		           = 7
-INTERNAL_IP6_ADDRESS	           = 8
-INTERNAL_IP6_DNS	               = 10
-INTERNAL_IP6_DHCP	               = 12
-INTERNAL_IP4_SUBNET	               = 13
-SUPPORTED_ATTRIBUTES	           = 14
-INTERNAL_IP6_SUBNET	               = 15
-MIP6_HOME_PREFIX	               = 16
-INTERNAL_IP6_LINK	               = 17
-INTERNAL_IP6_PREFIX	               = 18
-HOME_AGENT_ADDRESS	               = 19
-P_CSCF_IP4_ADDRESS	               = 20
-P_CSCF_IP6_ADDRESS	               = 21
-FTT_KAT		                       = 22
-EXTERNAL_SOURCE_IP4_NAT_INFO       = 23
-TIMEOUT_PERIOD_FOR_LIVENESS_CHECK  = 24
-INTERNAL_DNS_DOMAIN	               = 25
-INTERNAL_DNSSEC_TA                 = 26
-
-#IKEv2 Identification Payload ID Types
-ID_IPV4_ADDR     = 1
-ID_FQDN	         = 2
-ID_RFC822_ADDR	 = 3
-ID_IPV6_ADDR	 = 5
-ID_DER_ASN1_DN	 = 9
-ID_DER_ASN1_GN	 = 10
-ID_KEY_ID	     = 11
-ID_FC_NAME	     = 12
-ID_NULL	         = 13
-
-
-
-
-#EAP COde type
-EAP_REQUEST  = 1
-EAP_RESPONSE = 2
-EAP_SUCCESS  = 3
-EAP_FAILURE  = 4
-
-#IANA EAP Type
-EAP_AKA = 23
-
-#EAP-AKA/EAP-SIM Subtypes:
-AKA_Challenge = 1
-AKA_Authentication_Reject = 2
-AKA_Synchronization_Failure = 4
-AKA_Identity = 5
-SIM_Start = 10
-SIM_Challenge = 11
-AKA_Notification = 12
-SIM_Notification = 12
-AKA_Reauthentication = 13
-SIM_Reauthentication = 13
-AKA_Client_Error = 14
-SIM_Client_Error = 14
-
-#EAP-AKA/EAP-SIM Atrributes:
-AT_RAND = 1
-AT_AUTN = 2
-AT_RES = 3
-AT_AUTS = 4
-AT_PADDING = 6
-AT_NONCE_MT = 7
-AT_PERMANENT_ID_REQ = 10
-AT_MAC = 11
-AT_NOTIFICATION = 12
-AT_ANY_ID_REQ = 13
-AT_IDENTITY = 14
-AT_VERSION_LIST = 15
-AT_SELECTED_VERSION = 16
-AT_FULLAUTH_ID_REQ = 17
-AT_COUNTER = 19
-AT_COUNTER_TOO_SMALL = 20
-AT_NONCE_S = 21
-AT_CLIENT_ERROR_CODE = 22
-AT_IV = 129
-AT_ENCR_DATA = 130
-AT_NEXT_PSEUDONYM = 132
-AT_NEXT_REAUTH_ID = 133
-AT_CHECKCODE = 134
-AT_RESULT_IND = 135
-
-
-# Role
-ROLE_INITIATOR = 1
-ROLE_RESPONDER = 0
-
-
 class swu():
 
-    def __init__(self, source_address,epdg_address,apn,modem,default_gateway,mcc,mnc,imsi,ki,op,opc,netns,sqn):
+    def __init__(self, source_address,epdg_address,apn,modem,default_gateway,mcc,mnc,imsi,ki,op,opc,netns,sqn, no_default_route=False, no_dns=False, export_keys_dir=None, headless=False, imei=None, imeisv=None, dpd=None, keepalive=None, reconnect=None):
         self.source_address = source_address
         self.epdg_address = epdg_address
         self.apn = apn
@@ -404,6 +161,27 @@ class swu():
         
         self.netns_name = netns
         self.sqn = sqn
+        self.no_default_route = no_default_route
+        self.no_dns = no_dns
+        self.export_keys_dir = export_keys_dir
+        self.headless = headless
+        self.imei = imei if imei is not None else IMEI
+        self.imeisv = imeisv if imeisv is not None else IMEISV
+        self.dpd = dpd
+        self.keepalive = keepalive
+        self.reconnect_left = resolve_reconnect_attempts(reconnect)
+        self.shutting_down = False
+        self.want_reconnect = False
+        self.sa_list_initial = None
+        self.sa_list_child_initial = None
+        self.cp_liveness_seconds = None
+        self.liveness_interval = 0
+        self.liveness_outstanding = False
+        self.liveness_tries = 0
+        self.keepalive_interval = 0
+        self.ipsec_input_worker = None
+        self.ipsec_output_worker = None
+        self.tunnel = None
         
         self.set_variables()
         self.set_udp() # default
@@ -628,16 +406,25 @@ class swu():
             encr_alg = "NULL"
         return encr_alg    
     
+    def _export_key_line(self, filename, line):
+        if not self.export_keys_dir:
+            return
+        os.makedirs(self.export_keys_dir, exist_ok=True)
+        with open(os.path.join(self.export_keys_dir, filename), 'a') as file_obj:
+            file_obj.write(line + '\n')
+
     def print_ikev2_decryption_table(self):
         print('IKEv2 DECRYPTION TABLE INFO (Wireshark):')
         text = toHex(self.ike_spi_initiator) + ',' + toHex(self.ike_spi_responder) + ','
         text += toHex(self.SK_EI) + ',' + toHex(self.SK_ER) + ',"' + self.return_encryption_algorithm_name() + '",'
         text += toHex(self.SK_AI) + ',' + toHex(self.SK_AR) + ',"' + self.return_integrity_algorithm_name() + '"'
         print(text)
+        self._export_key_line('ikev2_decryption_table', text)
         text = toHex(self.ike_spi_responder) + ',' + toHex(self.ike_spi_initiator) + ','
         text += toHex(self.SK_ER) + ',' + toHex(self.SK_EI) + ',"' + self.return_encryption_algorithm_name() + '",'
         text += toHex(self.SK_AR) + ',' + toHex(self.SK_AI) + ',"' + self.return_integrity_algorithm_name() + '"'
         print(text)
+        self._export_key_line('ikev2_decryption_table', text)
 
 
     def print_esp_sa(self):
@@ -646,10 +433,12 @@ class swu():
         text += '","' + self.return_encryption_algorithm_child_name() + '","0x' + toHex(self.SK_IPSEC_EI)
         text += '","' + self.return_integrity_algorithm_child_name() + '","0x' + toHex(self.SK_IPSEC_AI) + '"'
         print(text)
+        self._export_key_line('esp_sa', text)
         text = '"IPv4","' + self.epdg_address + '","' + self.source_address + '","0x' + toHex(self.spi_init_child)
         text += '","' + self.return_encryption_algorithm_child_name() + '","0x' + toHex(self.SK_IPSEC_ER)
         text += '","' + self.return_integrity_algorithm_child_name() + '","0x' + toHex(self.SK_IPSEC_AR) + '"'
         print(text)
+        self._export_key_line('esp_sa', text)
 
 
        
@@ -722,7 +511,17 @@ class swu():
             
             
             
-    def dh_create_private_key_and_public_bytes(self,key_size):
+    def dh_create_private_key_and_public_bytes(self, group):
+        self.dh_group_num = group
+        curve = ECDH_CURVES.get(group)
+        if curve is not None:
+            self.pn = None
+            self.dh_private_key = ec.generate_private_key(curve)
+            self.dh_public_key_bytes = ecdh_encode_public(self.dh_private_key.public_key())
+            return
+        key_size = self.iana_diffie_hellman.get(group)
+        if key_size is None:
+            raise ValueError('unsupported DH group %s' % group)
         prime = {
              768: 0xFFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A63A3620FFFFFFFFFFFFFFFF,
             1024: 0xFFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381FFFFFFFFFFFFFFFF,                 
@@ -741,6 +540,12 @@ class swu():
         
         
     def dh_calculate_shared_key(self,peer_public_key_bytes):
+        curve = ECDH_CURVES.get(self.dh_group_num)
+        if curve is not None:
+            peer_public_key = ecdh_decode_public(curve, peer_public_key_bytes)
+            self.dh_shared_key = self.dh_private_key.exchange(ec.ECDH(), peer_public_key)
+            print('DIFFIE-HELLMAN KEY',toHex(self.dh_shared_key))
+            return
         peer_public_numbers = dh.DHPublicNumbers(int.from_bytes(peer_public_key_bytes, byteorder='big'), self.pn)
         peer_public_key = peer_public_numbers.public_key()
         self.dh_shared_key = self.dh_private_key.exchange(peer_public_key)
@@ -1112,7 +917,10 @@ class swu():
             attribute_value = b''
             if length > 0: 
                 att_len = self.configuration_payload_len_bytes.get(attribute_type)
-                if att_len == 4: #ip
+                if attribute_type == TIMEOUT_PERIOD_FOR_LIVENESS_CHECK and length == 4:
+                    attribute_value = struct.unpack("!I", data[position+4:position+8])[0]
+                    attribute_list.append((attribute_type, attribute_value))
+                elif att_len == 4: #ip
                     attribute_value = socket.inet_ntop(socket.AF_INET,data[position+4:position+8])
                     attribute_list.append((attribute_type,attribute_value))
                 elif att_len == 8: #ip /netmask
@@ -1186,10 +994,12 @@ class swu():
 #######################################################################################################################
         
     def set_sa_list(self,sa_list):
-        self.sa_list = sa_list    
+        self.sa_list = sa_list
+        self.sa_list_initial = copy.deepcopy(sa_list)
 
     def set_sa_list_child(self,sa_list):
-        self.sa_list_child = sa_list   
+        self.sa_list_child = sa_list
+        self.sa_list_child_initial = copy.deepcopy(sa_list) 
 
     def set_ts_list(self,type, ts_list):
         if type == TSI: self.ts_list_initiator = ts_list
@@ -1264,8 +1074,7 @@ class swu():
                 
                 
                 if proposal == 1 and transform_type == D_H and protocol_id == IKE:
-                    self.dh_create_private_key_and_public_bytes(self.iana_diffie_hellman.get(transform_id))   
-                    self.dh_group_num = transform_id       
+                    self.dh_create_private_key_and_public_bytes(transform_id) 
      
                 
                 last = 3
@@ -1414,10 +1223,10 @@ class swu():
         """
         if self.device_identity_type == 0x02:
             identity_type = 0x02
-            digits = IMEISV
+            digits = self.imeisv
         else:  # 0x01 or fallback
             identity_type = 0x01
-            digits = IMEI + 'F'  # pad 15-digit IMEI to 16 chars with trailing F
+            digits = self.imei + 'F'  # pad 15-digit IMEI to 16 chars with trailing F
 
         bcd = b''
         for i in range(0, len(digits), 2):
@@ -1525,11 +1334,16 @@ class swu():
 
 ### USER PLANE FUNCTIONS AND INTER PROCESS COMMUNICATION ####
 
+    def _run_host_cmd(self, cmd, shell=True):
+        if os.geteuid() != 0:
+            cmd = "sudo -n " + cmd
+        print("cmd: %s" % cmd)
+        subprocess.call(cmd, shell=shell)
+
     def exec_in_netns(self, cmd, shell=True):
         if self.netns_name:
             cmd = "ip netns exec %s %s" % (self.netns_name, cmd)
-        print("cmd: %s" % cmd)
-        subprocess.call(cmd, shell=shell)
+        self._run_host_cmd(cmd, shell=shell)
 
 
     def set_routes(self):
@@ -1537,32 +1351,42 @@ class swu():
         self.tunnel = self.open_tun(1)
         if self.netns_name:
             # create netns adn move the tun device into it
-            subprocess.call("ip netns add %s" % self.netns_name, shell=True)
-            subprocess.call("ip link set dev %s netns %s" % (self.tun_device, self.netns_name), shell=True)
+            self._run_host_cmd("ip netns add %s" % self.netns_name)
+            self._run_host_cmd("ip link set dev %s netns %s" % (self.tun_device, self.netns_name))
             # moving to netns brings device down again
             self.exec_in_netns("ip link set dev %s up" % (self.tun_device))
 
         if self.ip_address_list != []:
             self.exec_in_netns("ip addr add " + self.ip_address_list[0] + "/32 dev " + self.tun_device)
-            #set host route, only  required if no netns
-            if not self.netns_name:
-                if self.default_gateway is None:
-                    self.exec_in_netns("route add " + self.server_address[0] + "/32 gw " + self.get_default_gateway_linux()[0])
-                else:
-                    self.exec_in_netns("route add " + self.server_address[0] + "/32 gw " + self.default_gateway)
+            if not self.no_default_route:
+                #set host route, only  required if no netns
+                if not self.netns_name:
+                    if self.default_gateway is None:
+                        self.exec_in_netns("route add " + self.server_address[0] + "/32 gw " + self.get_default_gateway_linux()[0])
+                    else:
+                        self.exec_in_netns("route add " + self.server_address[0] + "/32 gw " + self.default_gateway)
                 
-            self.exec_in_netns("route add -net 0.0.0.0/1 gw " + self.ip_address_list[0])
-            self.exec_in_netns("route add -net 128.0.0.0/1 gw " + self.ip_address_list[0])
+                self.exec_in_netns("route add -net 0.0.0.0/1 gw " + self.ip_address_list[0])
+                self.exec_in_netns("route add -net 128.0.0.0/1 gw " + self.ip_address_list[0])
         
         if self.ipv6_address_list != []:
-            ipv6_address_prefix = ':'.join(self.ipv6_address_list[0].split(':')[0:4])
-            ipv6_address_identifier = 'fe80::' + ':'.join(self.ipv6_address_list[0].split(':')[4:8])
-            self.exec_in_netns("ip -6 addr add " + ipv6_address_identifier + "/64 dev " + self.tun_device)
-            self.exec_in_netns("route -A inet6 add ::/1 dev " + self.tun_device)
-            self.exec_in_netns("route -A inet6 add 8000::/1 dev " + self.tun_device)
+            # CFG_REPLY is a host address. Do not rewrite it to fe80::/64 — compressed
+            # values like 2001:db8:beef:: become the invalid prefix fe80:::/64.
+            ipv6 = format_ipv6_host(self.ipv6_address_list[0])
+            self.exec_in_netns("ip -6 addr add " + ipv6 + "/128 dev " + self.tun_device)
+            if not self.no_default_route:
+                self.exec_in_netns("route -A inet6 add ::/1 dev " + self.tun_device)
+                self.exec_in_netns("route -A inet6 add 8000::/1 dev " + self.tun_device)
+
+        # no_default_route leaves only the inner /32 or /128 on tun. Add host
+        # routes for CFG_REPLY DNS / P-CSCF so IMS servers are reachable
+        # without pulling the guest default table into the tunnel.
+        if self.no_default_route:
+            for cmd in self._cfg_reply_host_route_cmds('add'):
+                self.exec_in_netns(cmd)
         
         
-        if self.dns_address_list != [] or self.dnsv6_address_list != []:
+        if not self.no_dns and (self.dns_address_list != [] or self.dnsv6_address_list != []):
             if self.netns_name:
                 self.add_dir() #create directory for namespace if it doesn't exist
                 
@@ -1585,16 +1409,40 @@ class swu():
         if not os.path.isdir('/etc/netns/' + self.netns_name):   
             os.mkdir('/etc/netns/'  + self.netns_name)
 
-     
+    def _cfg_reply_host_route_cmds(self, action):
+        cmds = []
+        if not getattr(self, 'tun_device', None):
+            return cmds
+        for addr in getattr(self, 'dns_address_list', None) or []:
+            cmds.append('ip route %s %s/32 dev %s' % (action, addr, self.tun_device))
+        for addr in getattr(self, 'pcscf_address_list', None) or []:
+            cmds.append('ip route %s %s/32 dev %s' % (action, addr, self.tun_device))
+        for addr in getattr(self, 'dnsv6_address_list', None) or []:
+            cmds.append('ip -6 route %s %s/128 dev %s' % (
+                action, format_ipv6_host(addr), self.tun_device))
+        for addr in getattr(self, 'pcscfv6_address_list', None) or []:
+            cmds.append('ip -6 route %s %s/128 dev %s' % (
+                action, format_ipv6_host(addr), self.tun_device))
+        return cmds
+
     def delete_routes(self):
         if self.netns_name:
-            subprocess.call("ip netns del %s" % self.netns_name, shell=True)
+            self._run_host_cmd("ip netns del %s" % self.netns_name)
         else:
-            self.exec_in_netns("route del " + self.server_address[0] + "/32", shell=True)  
-            os.close(self.tunnel) 
-            if self.dns_address_list != []:
-                subprocess.call("cp /etc/resolv.backup.conf /etc/resolv.conf", shell=True)        
-      
+            if not self.no_default_route:
+                self.exec_in_netns("route del " + self.server_address[0] + "/32", shell=True)
+            else:
+                for cmd in self._cfg_reply_host_route_cmds('del'):
+                    self.exec_in_netns(cmd)
+            tunnel = getattr(self, 'tunnel', None)
+            if tunnel is not None:
+                try:
+                    os.close(tunnel)
+                except OSError:
+                    pass
+                self.tunnel = None
+            if not self.no_dns and getattr(self, 'dns_address_list', None):
+                subprocess.call("cp /etc/resolv.backup.conf /etc/resolv.conf", shell=True) 
 
     def get_default_source_address(self):
     
@@ -1619,6 +1467,9 @@ class swu():
 
     def open_tun(self,n):
         TUNSETIFF = 0x400454ca
+        SIOCGIFFLAGS = 0x8913
+        SIOCSIFFLAGS = 0x8914
+        IFF_UP    = 0x1
         IFF_TUN   = 0x0001
         IFF_TAP   = 0x0002
         IFF_NO_PI = 0x1000 # No Packet Information - to avoid 4 extra bytes
@@ -1631,8 +1482,18 @@ class swu():
 
         f = os.open("/dev/net/tun", os.O_RDWR)
         ifs = fcntl.ioctl(f, TUNSETIFF, struct.pack("16sH", bytes("tun%d" % n, "utf-8"), TUNMODE))
-        subprocess.call("ifconfig tun%d up" % n, shell=True) 
-    	   
+        # Bring the iface up in-process so CAP_NET_ADMIN on this interpreter
+        # is enough (ifconfig/ip as a child would drop file capabilities).
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            ifr = struct.pack("16sH22x", bytes(self.tun_device, "utf-8"), 0)
+            ifr = fcntl.ioctl(sock, SIOCGIFFLAGS, ifr)
+            _name, flags = struct.unpack_from("16sH", ifr)
+            ifr = struct.pack("16sH22x", bytes(self.tun_device, "utf-8"), flags | IFF_UP)
+            fcntl.ioctl(sock, SIOCSIFFLAGS, ifr)
+        finally:
+            sock.close()
+
         return f
 
 
@@ -1721,103 +1582,109 @@ class swu():
         
         return None
 
-    def encapsulate_ipsec(self,args):  
+    def _ignore_ipsec_worker_signals(self):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
+    def encapsulate_ipsec(self,args):  
+        self._ignore_ipsec_worker_signals()
         pipe_ike = args[0]
         socket_list = [self.tunnel, pipe_ike, self.socket_esp]
         encr_alg = None
         integ_alg = None
         sqn = 1
         
-        
-        while True:           
-            read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [])           
-            for sock in read_sockets:    
-                if sock == self.tunnel:
-                    tap_packet = os.read(self.tunnel, 1514)
-                    
-                    if encr_alg is not None:
+        try:
+            while True:           
+                read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [])           
+                for sock in read_sockets:    
+                    if sock == self.tunnel:
+                        tap_packet = os.read(self.tunnel, 1514)
                         
-                        encrypted_packet = self.encapsulate_esp_packet(tap_packet,encr_alg,encr_key,integ_alg,integ_key,spi_resp,sqn)
-                        if encrypted_packet is not None:
-                            sqn += 1
-                            if self.userplane_mode == ESP_PROTOCOL:
-                                self.socket_esp.sendto(encrypted_packet, self.server_address_esp)
-                            else:
-                                self.socket_nat.sendto(encrypted_packet, self.server_address_nat)
+                        if encr_alg is not None:
+                            
+                            encrypted_packet = self.encapsulate_esp_packet(tap_packet,encr_alg,encr_key,integ_alg,integ_key,spi_resp,sqn)
+                            if encrypted_packet is not None:
+                                sqn += 1
+                                if self.userplane_mode == ESP_PROTOCOL:
+                                    self.socket_esp.sendto(encrypted_packet, self.server_address_esp)
+                                else:
+                                    self.socket_nat.sendto(encrypted_packet, self.server_address_nat)
 
-                elif sock == pipe_ike:
-                    pipe_packet = pipe_ike.recv()                     
-                    decode_list = self.decode_inter_process_protocol(pipe_packet)
-                    if decode_list[0] == INTER_PROCESS_DELETE_SA:
-                        sys.exit()
-                    elif decode_list[0] in (INTER_PROCESS_CREATE_SA, INTER_PROCESS_UPDATE_SA):
-                        for i in decode_list[1]:
-                            if i[0] == INTER_PROCESS_IE_ENCR_ALG: encr_alg = i[1]
-                            if i[0] == INTER_PROCESS_IE_INTEG_ALG: integ_alg = i[1]
-                            if i[0] == INTER_PROCESS_IE_ENCR_KEY: encr_key = i[1]
-                            if i[0] == INTER_PROCESS_IE_INTEG_KEY: integ_key = i[1]                            
-                            if i[0] == INTER_PROCESS_IE_SPI_RESP: spi_resp = i[1]
-                    elif decode_list[0] == INTER_PROCESS_IKE and decode_list[1][0] == INTER_PROCESS_IE_IKE_MESSAGE: #not used for now. check 4 bytes zero if nat transversal
-                        ike_message = decode_list[1][1]                    
-                        self.socket_nat.sendto(ike_message, self.server_address_nat)
-        
+                    elif sock == pipe_ike:
+                        pipe_packet = pipe_ike.recv()                     
+                        decode_list = self.decode_inter_process_protocol(pipe_packet)
+                        if decode_list[0] == INTER_PROCESS_DELETE_SA:
+                            return 0
+                        elif decode_list[0] in (INTER_PROCESS_CREATE_SA, INTER_PROCESS_UPDATE_SA):
+                            for i in decode_list[1]:
+                                if i[0] == INTER_PROCESS_IE_ENCR_ALG: encr_alg = i[1]
+                                if i[0] == INTER_PROCESS_IE_INTEG_ALG: integ_alg = i[1]
+                                if i[0] == INTER_PROCESS_IE_ENCR_KEY: encr_key = i[1]
+                                if i[0] == INTER_PROCESS_IE_INTEG_KEY: integ_key = i[1]                            
+                                if i[0] == INTER_PROCESS_IE_SPI_RESP: spi_resp = i[1]
+                        elif decode_list[0] == INTER_PROCESS_IKE and decode_list[1][0] == INTER_PROCESS_IE_IKE_MESSAGE: #not used for now. check 4 bytes zero if nat transversal
+                            ike_message = decode_list[1][1]                    
+                            self.socket_nat.sendto(ike_message, self.server_address_nat)
+        except (KeyboardInterrupt, SystemExit):
+            return 0
         return 0
     
     
     def decapsulate_ipsec(self,args):
-        
+        self._ignore_ipsec_worker_signals()
         pipe_ike = args[0]
                 
         socket_list = [self.socket_nat, pipe_ike, self.socket_esp]
         encr_alg = None
         integ_alg = None
         
-        while True:
-            read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [])
-            for sock in read_sockets:
-                if sock == self.socket_nat:
-                    packet, address = self.socket_nat.recvfrom(2000)
-                    
-                    if encr_alg is not None:
-                        if packet[0:4] == b'\x00\x00\x00\x00': #is ike message
-                            inter_process_list_ike_message = [INTER_PROCESS_IKE,[(INTER_PROCESS_IE_IKE_MESSAGE, packet)]]
-                            pipe_ike.send(self.encode_inter_process_protocol(inter_process_list_ike_message))
-                            
-                        elif packet[0:4] == spi_init:
-                           
-                            if encr_alg is not None:
-                                decrypted_packet = self.decapsulate_esp_packet(packet,encr_alg,encr_key,integ_alg,integ_key)
-                                if decrypted_packet is not None:
-                                    
-                                    os.write(self.tunnel,decrypted_packet)
+        try:
+            while True:
+                read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [])
+                for sock in read_sockets:
+                    if sock == self.socket_nat:
+                        packet, address = self.socket_nat.recvfrom(2000)
                         
-                elif sock == self.socket_esp:
-                    packet, address = self.socket_esp.recvfrom(2000)
-                    if encr_alg is not None:
-                        if packet[20:24] == spi_init:
+                        if encr_alg is not None:
+                            if packet[0:4] == b'\x00\x00\x00\x00': #is ike message
+                                inter_process_list_ike_message = [INTER_PROCESS_IKE,[(INTER_PROCESS_IE_IKE_MESSAGE, packet)]]
+                                pipe_ike.send(self.encode_inter_process_protocol(inter_process_list_ike_message))
+                                
+                            elif packet[0:4] == spi_init:
+                               
+                                if encr_alg is not None:
+                                    decrypted_packet = self.decapsulate_esp_packet(packet,encr_alg,encr_key,integ_alg,integ_key)
+                                    if decrypted_packet is not None:
+                                        
+                                        os.write(self.tunnel,decrypted_packet)
                             
-                            if encr_alg is not None:
-                                decrypted_packet = self.decapsulate_esp_packet(packet[20:],encr_alg,encr_key,integ_alg,integ_key)
-                                if decrypted_packet is not None:
-                                    
-                                    os.write(self.tunnel,decrypted_packet)
-                        
-               
-                elif sock == pipe_ike:
-                    pipe_packet = pipe_ike.recv()                     
-                    decode_list = self.decode_inter_process_protocol(pipe_packet)
-                    if decode_list[0] == INTER_PROCESS_DELETE_SA:
-                        sys.exit()
-                    elif decode_list[0] in (INTER_PROCESS_CREATE_SA, INTER_PROCESS_UPDATE_SA):
-                        for i in decode_list[1]:
-                            if i[0] == INTER_PROCESS_IE_ENCR_ALG: encr_alg = i[1]
-                            if i[0] == INTER_PROCESS_IE_INTEG_ALG: integ_alg = i[1]
-                            if i[0] == INTER_PROCESS_IE_ENCR_KEY: encr_key = i[1]
-                            if i[0] == INTER_PROCESS_IE_INTEG_KEY: integ_key = i[1]                            
-                            if i[0] == INTER_PROCESS_IE_SPI_INIT: spi_init = i[1]
-
-
+                    elif sock == self.socket_esp:
+                        packet, address = self.socket_esp.recvfrom(2000)
+                        if encr_alg is not None:
+                            if packet[20:24] == spi_init:
+                                
+                                if encr_alg is not None:
+                                    decrypted_packet = self.decapsulate_esp_packet(packet[20:],encr_alg,encr_key,integ_alg,integ_key)
+                                    if decrypted_packet is not None:
+                                        
+                                        os.write(self.tunnel,decrypted_packet)
+                            
+                   
+                    elif sock == pipe_ike:
+                        pipe_packet = pipe_ike.recv()                     
+                        decode_list = self.decode_inter_process_protocol(pipe_packet)
+                        if decode_list[0] == INTER_PROCESS_DELETE_SA:
+                            return 0
+                        elif decode_list[0] in (INTER_PROCESS_CREATE_SA, INTER_PROCESS_UPDATE_SA):
+                            for i in decode_list[1]:
+                                if i[0] == INTER_PROCESS_IE_ENCR_ALG: encr_alg = i[1]
+                                if i[0] == INTER_PROCESS_IE_INTEG_ALG: integ_alg = i[1]
+                                if i[0] == INTER_PROCESS_IE_ENCR_KEY: encr_key = i[1]
+                                if i[0] == INTER_PROCESS_IE_INTEG_KEY: integ_key = i[1]                            
+                                if i[0] == INTER_PROCESS_IE_SPI_INIT: spi_init = i[1]
+        except (KeyboardInterrupt, SystemExit):
+            return 0
         return 0
 
     def decapsulate_esp_packet(self,packet,encr_alg,encr_key,integ_alg,integ_key):       
@@ -1927,14 +1794,31 @@ class swu():
             if i[0] == D_H: self.negotiated_diffie_hellman_group = i[1]            
    
     def remove_sa_from_list(self,accepted_dh_group): 
-        new_sa_list = []
-        for p in self.sa_list:
-            for i in p:
-                if i[0] == D_H and i[1] == accepted_dh_group:  
-                    new_sa_list.append(p)
-                    break              
-        self.sa_list = new_sa_list
-        
+        self.sa_list = filter_ike_sa_by_dh(self.sa_list, accepted_dh_group)
+        return self.sa_list
+
+    def _send_and_recv_ike(self, packet, sending_label):
+        # Same packet and message ID. IKE_SA_INIT already retries in start_ike.
+        for attempt in range(3):
+            self.send_data(packet)
+            print(sending_label if attempt == 0 else sending_label + ' (retransmit)')
+            try:
+                while True:
+                    if self.userplane_mode == ESP_PROTOCOL:
+                        data, _address = self.socket.recvfrom(2000)
+                        self.decode_ike(data)
+                    else:
+                        data, _address = self.socket_nat.recvfrom(2000)
+                        self.decode_ike(data[4:])
+                    if self.ike_decoded_ok:
+                        return OK, ''
+            except (SystemExit, KeyboardInterrupt):
+                raise
+            except:
+                if attempt == 2:
+                    return TIMEOUT, 'TIMEOUT'
+        return TIMEOUT, 'TIMEOUT'
+
 
     def set_sa_negotiated_child(self,num):
         sa_negotiated = self.sa_list_child[num-1]
@@ -2173,6 +2057,35 @@ class swu():
         return encrypted_and_integrity_packet
         
 
+    def create_INFORMATIONAL_liveness(self):
+        header = self.encode_header(self.ike_spi_initiator, self.ike_spi_responder, NONE, 2, 0, INFORMATIONAL, (0,0,1), self.message_id_request)
+        packet = self.set_ike_packet_length(header)
+        return self.encode_payload_type_sk(packet)
+
+    def send_liveness_check(self):
+        self.message_id_request += 1
+        self.send_data(self.create_INFORMATIONAL_liveness())
+        self.liveness_outstanding = True
+        self.liveness_tries += 1
+        print('sending INFORMATIONAL (liveness)')
+
+    def handle_connected_informational(self):
+        inner = self.decoded_payload[0][1] or []
+        is_request = self.ike_decoded_header['flags'][0] == 0
+        has_delete = any(item[0] == D for item in inner)
+        if is_request and has_delete:
+            self.state_delete(False)
+            return
+        if is_request:
+            self.send_data(self.answer_INFORMATIONAL_delete())
+            print('answering INFORMATIONAL (liveness)')
+            return
+        if self.liveness_outstanding:
+            self.liveness_outstanding = False
+            self.liveness_tries = 0
+            self.next_liveness = time.time() + self.liveness_interval
+            print('received INFORMATIONAL (liveness)')
+
     def answer_INFORMATIONAL_delete(self):
         if self.old_ike_message_received == True:    
             header = self.encode_header(self.ike_spi_initiator_old, self.ike_spi_responder_old, NONE, 2, 0, INFORMATIONAL, (1,0,1), self.ike_decoded_header['message_id'])        
@@ -2299,6 +2212,8 @@ class swu():
                     self.decode_ike(packet[4:])
                     if self.ike_decoded_ok == True: break                     
                 
+        except (SystemExit, KeyboardInterrupt):
+            raise
         except: #timeout          
             return TIMEOUT,'TIMEOUT'
         
@@ -2324,7 +2239,8 @@ class swu():
                 elif i[0] == N:    #protocol_id, notify_message_type, spi, notification_data
                     if i[1][1] == INVALID_KE_PAYLOAD:
                         accepted_dh_group = struct.unpack("!H", i[1][3])[0]
-                        self.remove_sa_from_list(accepted_dh_group)
+                        if not self.remove_sa_from_list(accepted_dh_group):
+                            return OTHER_ERROR, 'INVALID_KE_PAYLOAD'
                         return REPEAT_STATE,'INVALID_KE_PAYLOAD'
                     elif i[1][1]<16384: #error
                         return OTHER_ERROR,str(i[1][1])
@@ -2360,29 +2276,15 @@ class swu():
             return DECODING_ERROR,'DECODING_ERROR'
 
 
-    def state_2(self, retry = False):
+    def state_2(self, retry = False, eap_identity = False):
         self.message_id_request += 1
-        if retry == False:
-            packet = self.create_IKE_AUTH()
-        else:
+        if eap_identity or retry:
             packet = self.create_IKE_AUTH_EAP_IDENTITY()
-        self.send_data(packet)
-        print('sending IKE_AUTH (1)')        
-
-        try:
-        
-            while True:
-                if self.userplane_mode == ESP_PROTOCOL:
-                    packet, address = self.socket.recvfrom(2000)  
-                    self.decode_ike(packet)
-                    if self.ike_decoded_ok == True: break                
-                else:
-                    packet, address = self.socket_nat.recvfrom(2000)  
-                    self.decode_ike(packet[4:])
-                    if self.ike_decoded_ok == True: break                     
-                
-        except: #timeout
-            return TIMEOUT,'TIMEOUT'        
+        else:
+            packet = self.create_IKE_AUTH()
+        result, info = self._send_and_recv_ike(packet, 'sending IKE_AUTH (1)')
+        if result != OK:
+            return result, info
         
         eap_received = False
         if self.ike_decoded_header['exchange_type'] == IKE_AUTH and self.decoded_payload[0][0] == SK:
@@ -2397,7 +2299,13 @@ class swu():
                     elif i[1][1]<16384: #error
                         return OTHER_ERROR,str(i[1][1])
                 elif i[0] == EAP:
-   
+                    if is_eap_identity_request(i[1]):
+                        self.eap_identifier = i[1][1]
+                        self.eap_payload_response = eap_identity_reply(
+                            i[1], self.imsi, self.mnc, self.mcc
+                        )
+                        return REPEAT_STATE, 'EAP IDENTITY REQUESTED'
+
                     if i[1][0] in (EAP_REQUEST,) and i[1][2] in (EAP_AKA,):
                         if i[1][3] in (AKA_Challenge, AKA_Reauthentication):
                             
@@ -2533,13 +2441,7 @@ class swu():
                       
                             if i[1][4][0][0] in (AT_ANY_ID_REQ, AT_IDENTITY):
                                 self.eap_identifier = i[1][1]
-                                identity = (
-                                        '0'
-                                        + self.imsi
-                                        + '@nai.epc.mnc' + self.mnc
-                                        + '.mcc' + self.mcc
-                                        + '.3gppnetwork.org'
-                                )
+                                identity = eap_permanent_nai(self.imsi, self.mnc, self.mcc)
                                 self.eap_payload_response = (
                                         bytes([2])
                                         + bytes([self.eap_identifier])
@@ -2565,24 +2467,9 @@ class swu():
     def state_3(self):
         self.message_id_request += 1
         packet = self.create_IKE_AUTH_2()
-        self.send_data(packet)
-        print('sending IKE_SA_AUTH (2)')        
-
-
-        try:
-            while True:
-                if self.userplane_mode == ESP_PROTOCOL:
-                    packet, address = self.socket.recvfrom(2000)  
-                    self.decode_ike(packet)
-                    if self.ike_decoded_ok == True: break                
-                else:
-                    packet, address = self.socket_nat.recvfrom(2000)  
-                    self.decode_ike(packet[4:])
-                    if self.ike_decoded_ok == True: break                     
-                
-        except: #timeout
-            return TIMEOUT,'TIMEOUT'        
-        
+        result, info = self._send_and_recv_ike(packet, 'sending IKE_SA_AUTH (2)')
+        if result != OK:
+            return result, info
         
         eap_received = False
         if self.ike_decoded_header['exchange_type'] == IKE_AUTH and self.decoded_payload[0][0] == SK:
@@ -2702,22 +2589,9 @@ class swu():
     def state_4(self):
         self.message_id_request += 1
         packet = self.create_IKE_AUTH_3()
-        self.send_data(packet)
-        print('sending IKE_AUTH (3)')        
-            
-        try:
-            while True:
-                if self.userplane_mode == ESP_PROTOCOL:
-                    packet, address = self.socket.recvfrom(2000)  
-                    self.decode_ike(packet)
-                    if self.ike_decoded_ok == True: break                
-                else:
-                    packet, address = self.socket_nat.recvfrom(2000)  
-                    self.decode_ike(packet[4:])
-                    if self.ike_decoded_ok == True: break                     
-                
-        except: #timeout
-            return TIMEOUT,'TIMEOUT'            
+        result, info = self._send_and_recv_ike(packet, 'sending IKE_AUTH (3)')
+        if result != OK:
+            return result, info
             
         if self.ike_decoded_header['exchange_type'] == IKE_AUTH and self.decoded_payload[0][0] == SK:
             print('received IKE_AUTH (3)')             
@@ -2742,6 +2616,10 @@ class swu():
                         print('IPV6 ADDRESS', self.ipv6_address_list)
                         print('DNS IPV6 ADDRESS', self.dnsv6_address_list)                        
                         print('P-CSCF IPV6 ADDRESS', self.pcscfv6_address_list)
+                        liveness = self.get_cp_attribute_value(i[1][1], TIMEOUT_PERIOD_FOR_LIVENESS_CHECK)
+                        if liveness:
+                            self.cp_liveness_seconds = liveness[0]
+                            print('TIMEOUT PERIOD FOR LIVENESS CHECK', self.cp_liveness_seconds)
                         if self.ip_address_list == [] and self.ipv6_address_list == []:
                             return OTHER_ERROR,'NO IP ADDRESS (IPV4 or IPV6)'                       
                     else:
@@ -2763,6 +2641,84 @@ class swu():
             return OK,''               
 
 
+    def _stop_ipsec_workers(self):
+        encoder = getattr(self, 'ike_to_ipsec_encoder', None)
+        decoder = getattr(self, 'ike_to_ipsec_decoder', None)
+        if encoder is not None:
+            try:
+                encoder.send(bytes([INTER_PROCESS_DELETE_SA]))
+            except (EOFError, BrokenPipeError, OSError):
+                pass
+        if decoder is not None:
+            try:
+                decoder.send(bytes([INTER_PROCESS_DELETE_SA]))
+            except (EOFError, BrokenPipeError, OSError):
+                pass
+        for worker in (self.ipsec_input_worker, self.ipsec_output_worker):
+            if worker is None:
+                continue
+            worker.join(2)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(1)
+            if worker.is_alive():
+                worker.kill()
+                worker.join(1)
+        self.ipsec_input_worker = None
+        self.ipsec_output_worker = None
+        self.delete_routes()
+
+    def _end_connected_session(self):
+        self._stop_ipsec_workers()
+        if self.shutting_down or self.reconnect_left <= 0:
+            exit(1)
+        self.want_reconnect = True
+
+    def reset_for_reconnect(self):
+        if self.sa_list_initial is not None:
+            self.sa_list = copy.deepcopy(self.sa_list_initial)
+        if self.sa_list_child_initial is not None:
+            self.sa_list_child = copy.deepcopy(self.sa_list_child_initial)
+        self.message_id_request = 0
+        self.message_id_responses = 0
+        self.cookie = False
+        self.userplane_mode = ESP_PROTOCOL
+        self.cp_liveness_seconds = None
+        self.liveness_outstanding = False
+        self.liveness_tries = 0
+        self.device_identity_requested = False
+        self.device_identity_type = None
+        self.next_reauth_id = None
+        self.old_ike_message_received = False
+        self.want_reconnect = False
+        self.ike_to_ipsec_encoder = None
+        self.ike_to_ipsec_decoder = None
+        self.ipsec_input_worker = None
+        self.ipsec_output_worker = None
+        self.set_identification(IDI, ID_RFC822_ADDR, '0' + self.imsi + '@nai.epc.mnc' + self.mnc + '.mcc' + self.mcc + '.3gppnetwork.org')
+        self.set_identification(IDR, ID_FQDN, self.apn)
+
+    def send_nat_keepalive(self):
+        if self.userplane_mode != NAT_TRAVERSAL or self.keepalive_interval <= 0:
+            return
+        self.socket_nat.sendto(b'\xff', self.server_address_nat)
+        self.next_keepalive = time.time() + self.keepalive_interval
+        print('sending NAT keepalive')
+
+    def _connected_select_timeout(self):
+        now = time.time()
+        waits = []
+        if self.liveness_interval:
+            if self.liveness_outstanding:
+                waits.append(self.timeout)
+            else:
+                waits.append(max(0, self.next_liveness - now))
+        if self.keepalive_interval and self.userplane_mode == NAT_TRAVERSAL:
+            waits.append(max(0, self.next_keepalive - now))
+        if not waits:
+            return None
+        return min(waits)
+
     def state_delete(self,initiator,kill = True):
         if initiator == True:
             
@@ -2773,11 +2729,11 @@ class swu():
                 self.send_data(packet)
                 print('sending INFORMATIONAL (delete IKE)')
                 
-            self.ike_to_ipsec_encoder.send(bytes([INTER_PROCESS_DELETE_SA]))
-            self.ike_to_ipsec_decoder.send(bytes([INTER_PROCESS_DELETE_SA])) 
-            self.delete_routes()   
+            self._stop_ipsec_workers()
             if kill == True:
-                exit(1)
+                if self.shutting_down or self.reconnect_left <= 0:
+                    exit(1)
+                self.want_reconnect = True
 
         
         else:
@@ -2794,10 +2750,7 @@ class swu():
                         self.send_data(packet)
                         print('answering INFORMATIONAL (DELETE IKE)')
                         if self.old_ike_message_received == False:
-                            self.ike_to_ipsec_encoder.send(bytes([INTER_PROCESS_DELETE_SA]))
-                            self.ike_to_ipsec_decoder.send(bytes([INTER_PROCESS_DELETE_SA])) 
-                            self.delete_routes()
-                            exit(1)    
+                            self._end_connected_session()
                             
                     elif protocol == ESP:
                         print('received INFORMATIONAL (DELETE SA CHILD)') 
@@ -2850,8 +2803,7 @@ class swu():
         self.sa_list_negotiated[0][0][1] = 8
         self.sa_list_create_child_sa = self.sa_list_negotiated
                 
-        self.dh_create_private_key_and_public_bytes(self.iana_diffie_hellman.get(self.negotiated_diffie_hellman_group))   
-        self.dh_group_num = self.negotiated_diffie_hellman_group 
+        self.dh_create_private_key_and_public_bytes(self.negotiated_diffie_hellman_group) 
         
         self.message_id_request += 1
         packet = self.create_CREATE_CHILD_SA(lowest)
@@ -2959,6 +2911,16 @@ class swu():
             self.send_data(packet)        
             print('sending INFORMATIONAL (DELETE IPSEC old)')            
 
+    def _handle_shutdown(self, signum, frame):
+        self.shutting_down = True
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            self.state_delete(True)
+        except Exception:
+            self.delete_routes()
+            exit(1)
+
     def state_connected(self):
         #set udp 4500 socket (self.socket_nat)
      
@@ -2967,11 +2929,17 @@ class swu():
         #set ipsec tunnel handlers
         self.ike_to_ipsec_encoder, self.ipsec_encoder_to_ike = multiprocessing.Pipe()
         self.ike_to_ipsec_decoder, self.ipsec_decoder_to_ike = multiprocessing.Pipe()
-           
-        ipsec_input_worker = multiprocessing.Process(target = self.encapsulate_ipsec, args=([self.ipsec_encoder_to_ike],))
-        ipsec_input_worker.start()
-        ipsec_output_worker = multiprocessing.Process(target = self.decapsulate_ipsec, args=([self.ipsec_decoder_to_ike],))
-        ipsec_output_worker.start()
+
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            self.ipsec_input_worker = multiprocessing.Process(target = self.encapsulate_ipsec, args=([self.ipsec_encoder_to_ike],))
+            self.ipsec_input_worker.start()
+            self.ipsec_output_worker = multiprocessing.Process(target = self.decapsulate_ipsec, args=([self.ipsec_decoder_to_ike],))
+            self.ipsec_output_worker.start()
+        finally:
+            signal.signal(signal.SIGINT, self._handle_shutdown)
+            signal.signal(signal.SIGTERM, self._handle_shutdown)
         
         inter_process_list_start_encoder = [
             INTER_PROCESS_CREATE_SA,
@@ -2998,12 +2966,41 @@ class swu():
         self.ike_to_ipsec_encoder.send(self.encode_inter_process_protocol(inter_process_list_start_encoder))
         self.ike_to_ipsec_decoder.send(self.encode_inter_process_protocol(inter_process_list_start_decoder))       
 
-        
-        socket_list = [sys.stdin , self.socket, self.ike_to_ipsec_decoder]
+        self.liveness_interval = resolve_dpd_seconds(self.dpd, self.cp_liveness_seconds)
+        self.keepalive_interval = resolve_keepalive_seconds(self.keepalive)
+        self.liveness_outstanding = False
+        self.liveness_tries = 0
+        now = time.time()
+        self.next_liveness = now + self.liveness_interval if self.liveness_interval else 0
+        self.next_keepalive = now + self.keepalive_interval if self.keepalive_interval else 0
+        if self.liveness_interval:
+            print('liveness every', self.liveness_interval, 's')
+        if self.keepalive_interval and self.userplane_mode == NAT_TRAVERSAL:
+            print('NAT keepalive every', self.keepalive_interval, 's')
+
+        socket_list = [self.socket, self.ike_to_ipsec_decoder]
+        if not self.headless:
+            socket_list.insert(0, sys.stdin)
         
         while True:
-            
-            read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [])
+            if self.want_reconnect or self.shutting_down:
+                return
+            select_timeout = self._connected_select_timeout()
+            read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [], select_timeout)
+            if not read_sockets:
+                now = time.time()
+                if self.liveness_outstanding and self.liveness_tries >= 2:
+                    self._report_ike_result(OTHER_ERROR, 'LIVENESS TIMEOUT')
+                    self.state_delete(True)
+                    return
+                if self.liveness_interval and (self.liveness_outstanding or now >= self.next_liveness):
+                    self.send_liveness_check()
+                    self.next_liveness = now + self.liveness_interval
+                    if self.keepalive_interval:
+                        self.next_keepalive = now + self.keepalive_interval
+                elif self.keepalive_interval and self.userplane_mode == NAT_TRAVERSAL and now >= self.next_keepalive:
+                    self.send_nat_keepalive()
+                continue
             
             for sock in read_sockets:
      
@@ -3016,8 +3013,10 @@ class swu():
                         self.decode_ike(packet)    
                         if self.ike_decoded_ok == True:
                 
-                            if self.ike_decoded_header['exchange_type'] == INFORMATIONAL and self.decoded_payload[0][0] == SK and self.ike_decoded_header['flags'][0] == 0:
-                                self.state_delete(False)
+                            if self.ike_decoded_header['exchange_type'] == INFORMATIONAL and self.decoded_payload[0][0] == SK:
+                                self.handle_connected_informational()
+                                if self.want_reconnect or self.shutting_down:
+                                    return
                                
                             elif self.ike_decoded_header['exchange_type'] == CREATE_CHILD_SA and self.decoded_payload[0][0] == SK and self.ike_decoded_header['flags'][0] == 0:
                                 self.state_epdg_create_sa()
@@ -3041,12 +3040,16 @@ class swu():
                         packet = decode_list[1][0][1]
                         
                         #if received via pipe it was sent to port udp 4500 (exclude 4 initial bytes)
+                        if self.keepalive_interval:
+                            self.next_keepalive = time.time() + self.keepalive_interval
                         self.decode_ike(packet[4:]) 
 
                         if self.ike_decoded_ok == True:                           
                             
-                            if self.ike_decoded_header['exchange_type'] == INFORMATIONAL and self.decoded_payload[0][0] == SK and self.ike_decoded_header['flags'][0] == 0:
-                                self.state_delete(False)
+                            if self.ike_decoded_header['exchange_type'] == INFORMATIONAL and self.decoded_payload[0][0] == SK:
+                                self.handle_connected_informational()
+                                if self.want_reconnect or self.shutting_down:
+                                    return
                             
                             elif self.ike_decoded_header['exchange_type'] == CREATE_CHILD_SA and self.decoded_payload[0][0] == SK and self.ike_decoded_header['flags'][0] == 0:
                                 self.state_epdg_create_sa()                        
@@ -3059,8 +3062,13 @@ class swu():
 
                 else:
                     msg = sys.stdin.readline()
+                    if msg == '':
+                        socket_list = [item for item in socket_list if item is not sys.stdin]
+                        continue
                     if msg == "q\n":  #quit
+                        self.shutting_down = True
                         self.state_delete(True)
+                        return
                     elif msg =="i\n": #rekey ike
                         self.state_ue_create_sa()
                     elif msg =="c\n": #rekey sa child
@@ -3082,26 +3090,41 @@ class swu():
                         
     
 
+    def _report_ike_result(self, result, info):
+        print(self.errors.get(result), ':', info)
+        sys.stdout.write(format_ike_event(result, info) + '\n')
+        sys.stdout.flush()
+
+    def _ike_attempt_failed(self, result, info):
+        self._report_ike_result(result, info)
+        if self.shutting_down:
+            exit(1)
+        if not getattr(self, 'sa_list', None):
+            self.iterations = 0
+
     def start_ike(self):
+        signal.signal(signal.SIGINT, self._handle_shutdown)
+        signal.signal(signal.SIGTERM, self._handle_shutdown)
         self.iterations = 2
         self.cookie = False
         while self.iterations>0:
-        
+            if self.shutting_down:
+                exit(1)
             self.iterations -= 1
         
             print('\nSTATE 1:\n-------')
             result,info = self.state_1()
             if result in (REPEAT_STATE, TIMEOUT): 
-                print(self.errors.get(result),':',info)
+                self._report_ike_result(result, info)
                 print('\nSTATE 1 (retry 1):\n------- -------')
                 result,info = self.state_1(retry=True)
             elif result in (REPEAT_STATE_COOKIE,):
-                print(self.errors.get(result),':',info)
+                self._report_ike_result(result, info)
                 print('\nSTATE 1 (retry 1 with cookie):\n------- -------')            
                 result,info = self.state_1(retry=True, cookie=True)
                                 
             if result in (REPEAT_STATE, TIMEOUT): 
-                print(self.errors.get(result),':',info)
+                self._report_ike_result(result, info)
                 print('\nSTATE 1: (retry 2)\n------- -------')
                 if self.cookie == True:
                     result,info = self.state_1(retry=True, cookie=True)                
@@ -3112,38 +3135,61 @@ class swu():
                 print('\nSTATE 2:\n-------')
                 result,info = self.state_2()
             else:
-                print(self.errors.get(result),':',info)
+                self._ike_attempt_failed(result, info)
                 continue                
             
+            if result in (REPEAT_STATE,) and info == 'EAP IDENTITY REQUESTED':
+                self._report_ike_result(result, info)
+                print('\nSTATE 2 (eap identity):\n---------------')
+                result,info = self.state_2(eap_identity=True)
+
             if result in (REPEAT_STATE, OK):
                 if result in (REPEAT_STATE,):
-                    print(self.errors.get(result),':',info)
+                    self._report_ike_result(result, info)
                     print('\nSTATE 2 (repeat):\n---------------')
                     result,info = self.state_2(retry=True)                      
                 if result in (OK,):
                     print('\nSTATE 3:\n-------')
                     result,info = self.state_3()
             else:
-                print(self.errors.get(result),':',info)
+                self._ike_attempt_failed(result, info)
                 continue 
                 
             if result in (OK, REPEAT_STATE):
                 if result in (REPEAT_STATE,):
-                    print(self.errors.get(result),':',info)
+                    self._report_ike_result(result, info)
                     print('\nSTATE 3 (repeat):\n---------------')
                     result,info = self.state_3()                                    
                 if result in (OK,):
                     print('\nSTATE 4:\n-------')
                     result,info = self.state_4()                   
             else:
-                print(self.errors.get(result),':',info)
+                self._ike_attempt_failed(result, info)
                 continue 
                 
             if result == OK:
-                print('\nSTATE CONNECTED. Press q to quit, i to rekey ike, c to rekey child sa, r to reauth.\n')
-                self.state_connected()        
+                sys.stdout.write(format_connected_event(
+                    self.apn,
+                    self.epdg_address,
+                    getattr(self, 'ip_address_list', None),
+                    getattr(self, 'ipv6_address_list', None),
+                ) + '\n')
+                sys.stdout.flush()
+                if self.headless:
+                    print('\nSTATE CONNECTED.\n')
+                else:
+                    print('\nSTATE CONNECTED. Press q to quit, i to rekey ike, c to rekey child sa, r to reauth.\n')
+                self.state_connected()
+                if self.shutting_down:
+                    exit(1)
+                if self.want_reconnect and self.reconnect_left > 0:
+                    self.reconnect_left -= 1
+                    self._report_ike_result(REPEAT_STATE, 'RECONNECT')
+                    self.reset_for_reconnect()
+                    self.iterations = 2
+                    continue
             else:
-                print(self.errors.get(result),':',info)
+                self._ike_attempt_failed(result, info)
                 continue 
             
         exit(1)    
@@ -3240,234 +3286,6 @@ def sha1_dss(data):  #for MSK
     return struct.pack('!I',h0) + struct.pack('!I',h1) + struct.pack('!I',h2) + struct.pack('!I',h3) + struct.pack('!I',h4)
 
 
-#abstraction functions
-
-def milenage_res_ck_ik(ki, op, opc, rand):
-    rand = unhexlify(rand)
-    ki = unhexlify(ki)
-    if op == None: 
-        opc = unhexlify(opc)
-        op = 16*b'\x00' #dummy since we will set opc directly
-        m = Milenage(op)
-        m.set_opc(opc)
-    else:
-        op = unhexlify(op)
-        m = Milenage(op)
-    res, ck, ik, ak = m.f2345(ki, rand)
-    return hexlify(res), hexlify(ck), hexlify(ik)
-
-
-def byte_xor(ba1, ba2):
-    return bytes([_a ^ _b for _a, _b in zip(ba1, ba2)])
-
-def return_auts(rand, autn,ki,op,opc,sqn):
-    rand = unhexlify(rand)
-    ki = unhexlify(ki)
-    autn = unhexlify(autn)
-    sqn = unhexlify(sqn)
-    if op == None: 
-        opc = unhexlify(opc)
-        op = 16*b'\x00' #dummy since we will set opc directly
-        m = Milenage(op)
-        m.set_opc(opc)
-    else:
-        op = unhexlify(op)
-        m = Milenage(op)
-    macs = m.f1star(ki,rand,sqn,b'\x00\x00')
-    ak = m.f5star(ki,rand)
-    ak_xor_sqn = byte_xor(ak, sqn)
-    return  ak_xor_sqn + macs
-
-
-def return_imsi(serial_interface_or_reader_index):
-    try:
-        return read_imsi_2(serial_interface_or_reader_index)
-    except:
-        try:
-            return get_imsi(serial_interface_or_reader_index)
-        except:
-            try:
-                return https_imsi(serial_interface_or_reader_index)
-            except:
-                print('Unable to access serial port/smartcard reader/server. Using DEFAULT IMSI: ' + DEFAULT_IMSI)
-                return DEFAULT_IMSI
-        
-def return_res_ck_ik(serial_interface_or_reader_index, rand, autn, ki, op, opc):
-    if ki is not None and (op is not None or opc is not None):
-        try:
-            return milenage_res_ck_ik(ki, op, opc, rand)
-        except:
-            print('Unable to calculate Milenage RES/CK/IK. Check KI, OP or OPC. Using DEFAULT RES, CK and IK')
-            return DEFAULT_RES, DEFAULT_CK, DEFAULT_IK
-    else:
-        try:
-            return read_res_ck_ik_2(serial_interface_or_reader_index, rand, autn)
-        except:
-            try:        
-                return get_res_ck_ik(serial_interface_or_reader_index, rand, autn)
-            except:
-                try:
-                    return https_res_ck_ik(serial_interface_or_reader_index, rand, autn)
-                except:
-                    print('Unable to access serial port/smartcard reader/server. Using DEFAULT RES, CK and IK')
-                    return DEFAULT_RES, DEFAULT_CK, DEFAULT_IK
-
-
-
-
-def get_imsi(serial_interface):
-
-    imsi = None
-    
-    ser = serial.Serial(serial_interface,38400, timeout=0.5,xonxoff=True, rtscts=True, dsrdtr=True, exclusive =True)
-
-    CLI = []
-    CLI.append('AT+CIMI\r\n')
-    
-    a = time.time()
-    for i in range(len(CLI)):
-        ser.write(CLI[i].encode())
-        buffer = ''
-
-        while "OK\r\n" not in buffer and "ERROR\r\n" not in buffer:
-            buffer +=  ser.read().decode("utf-8")
-            
-            if time.time()-a > 0.5:
-                ser.write(CLI[i].encode())
-                a = time.time() +1
-            
-        if i==0:    
-            for m in buffer.split('\r\n'):
-                if len(m) == 15:
-                    imsi = m
-         
-    ser.close()
-    return imsi
-
-
-def get_res_ck_ik(serial_interface, rand, autn):
-    res = None
-    ck = None
-    ik = None
-    
-    ser = serial.Serial(serial_interface,38400, timeout=0.5,xonxoff=True, rtscts=True, dsrdtr=True, exclusive =True)
-
-    CLI = []
-   
-    #CLI.append('AT+CRSM=178,12032,1,4,0\r\n')
-    CLI.append('AT+CSIM=14,"00A40000023F00"\r\n')
-    CLI.append('AT+CSIM=14,"00A40000022F00"\r\n')
-    CLI.append('AT+CSIM=42,"00A4040010A0000000871002FFFFFFFF8903050001"\r\n')
-    CLI.append('AT+CSIM=78,\"008800812210' + rand.upper() + '10' + autn.upper() + '\"\r\n')
-
-    a = time.time()
-    for i in CLI:
-        ser.write(i.encode())
-        buffer = ''
-    
-        while "OK" not in buffer and "ERROR" not in buffer:
-            buffer +=  ser.read().decode("utf-8")
-        
-            if time.time()-a > 0.5:
-                ser.write(i.encode())
-
-                a = time.time() + 1
-                
-    for i in buffer.split('"'):
-        if len(i)==4:
-            if i[0:2] == '61':
-                len_result = i[-2:]
-    
-    LAST_CLI = 'AT+CSIM=10,"00C00000' + len_result + '\"\r\n'
-    ser.write(LAST_CLI.encode())
-    buffer = ''
-    
-    while "OK\r\n" not in buffer and "ERROR\r\n" not in buffer:
-        buffer +=  ser.read().decode("utf-8")
-        
-    for result in buffer.split('"'):
-        if len(result) > 10:
-        
-
-            res = result[4:20]
-            ck = result[22:54]
-            ik = result[56:88]
-    
-    ser.close()    
-    return res, ck, ik
-    
-
-#reader functions
-def bcd(chars):
-    bcd_string = ""
-    for i in range(len(chars) // 2):
-        bcd_string += chars[1+2*i] + chars[2*i]
-    return bcd_string
-
-def read_imsi(reader_index):
-    imsi = None
-    r = readers()
-    connection = r[int(reader_index)].createConnection()
-    connection.connect()
-    data, sw1, sw2 = connection.transmit(toBytes('00A40000023F00'))     
-    data, sw1, sw2 = connection.transmit(toBytes('00A40000027F20'))
-    data, sw1, sw2 = connection.transmit(toBytes('00A40000026F07'))
-    data, sw1, sw2 = connection.transmit(toBytes('00B0000009'))  
-    result = toHexString(data).replace(" ","")
-    imsi = bcd(result)[-15:]
-    
-    return imsi
-
-def read_res_ck_ik(reader_index, rand, autn):
-    res = None
-    ck = None
-    ik = None
-    r = readers()
-    connection = r[int(reader_index)].createConnection()
-    connection.connect()
-    data, sw1, sw2 = connection.transmit(toBytes('00A40000023F00'))    
-    data, sw1, sw2 = connection.transmit(toBytes('00A40000022F00')) 
-    data, sw1, sw2 = connection.transmit(toBytes('00A4040010A0000000871002FFFFFFFF8903050001'))   
-    data, sw1, sw2 = connection.transmit(toBytes('008800812210' + rand.upper() + '10' + autn.upper()))   
-    if sw1 == 97:
-        data, sw1, sw2 = connection.transmit(toBytes('00C00000') + [sw2])         
-        result = toHexString(data).replace(" ", "")
-        res = result[4:20]
-        ck = result[22:54]
-        ik = result[56:88]          
-
-    return res, ck, ik
-
-#reader functions - more generic using card module
-def read_imsi_2(reader_index): #prepared for AUTS
-    a = USIM(int(reader_index))
-    print(a.get_imsi())
-    return a.get_imsi()
-    
-def read_res_ck_ik_2(reader_index,rand,autn):
-    a = USIM(int(reader_index))
-    x = a.authenticate(RAND=toBytes(rand), AUTN=toBytes(autn))
-    if len(x) == 1: #AUTS goes in RES position
-        return toHexString(x[0]).replace(" ", ""), None, None
-    elif len(x) > 2:
-        return toHexString(x[0]).replace(" ", ""),toHexString(x[1]).replace(" ", ""),toHexString(x[2]).replace(" ", "") 
-    else:
-        return None, None, None
-
-
-#https functions
-def https_imsi(server):
-    r = requests.get('https://' + server + '/?type=imsi', verify=False)
-    return r.json()['imsi']
-
-def https_res_ck_ik(server, rand, autn):
-    r = requests.get('https://' + server + '/?type=rand-autn&rand=' + rand + '&autn=' + autn, verify=False)
-    return r.json()['res'], r.json()['ck'], r.json()['ik']
-
-
-
-
-
 #################################################################################################################    
 #####
 #####   SA Structure:
@@ -3518,7 +3336,8 @@ def main():
         [INTERNAL_IP6_ADDRESS],
         [INTERNAL_IP6_DNS],
         [P_CSCF_IP4_ADDRESS],
-        [P_CSCF_IP6_ADDRESS]
+        [P_CSCF_IP6_ADDRESS],
+        [TIMEOUT_PERIOD_FOR_LIVENESS_CHECK]
     ]
 
     ts_list_initiator = [
@@ -3554,6 +3373,27 @@ def main():
        [PRF,PRF_HMAC_SHA1],
        [INTEG,AUTH_HMAC_SHA1_96],
        [D_H,MODP_1024_bit]  
+    ],
+    [
+       [IKE,0],
+       [ENCR,ENCR_AES_CBC,[KEY_LENGTH,128]],
+       [PRF,PRF_HMAC_SHA1],
+       [INTEG,AUTH_HMAC_SHA1_96],
+       [D_H,ECP_256_bit]
+    ],
+    [
+       [IKE,0],
+       [ENCR,ENCR_AES_CBC,[KEY_LENGTH,128]],
+       [PRF,PRF_HMAC_SHA1],
+       [INTEG,AUTH_HMAC_SHA1_96],
+       [D_H,ECP_384_bit]
+    ],
+    [
+       [IKE,0],
+       [ENCR,ENCR_AES_CBC,[KEY_LENGTH,128]],
+       [PRF,PRF_HMAC_SHA1],
+       [INTEG,AUTH_HMAC_SHA1_96],
+       [D_H,ECP_521_bit]
     ]
   
     ]
@@ -3605,38 +3445,42 @@ def main():
     ]
 
 
-    parser = OptionParser()    
-    parser.add_option("-m", "--modem", dest="modem", default=DEFAULT_COM, help="modem port (i.e. COMX, or /dev/ttyUSBX), smartcard reader index (0, 1, 2, ...), or server for https")
-    parser.add_option("-s", "--source", dest="source_addr",default=get_default_source_address(),help="IP address of source interface used for IKE/IPSEC")
-    parser.add_option("-d", "--dest", dest="destination_addr",default=DEFAULT_SERVER,help="ip address or fqdn of ePDG") 
-    parser.add_option("-a", "--apn", dest="apn", default=DEFAULT_APN, help="APN to use")    
-    parser.add_option("-g", "--gateway_ip_address", dest="gateway_ip_address", help="gateway IP address")    
-    parser.add_option("-I", "--imsi", dest="imsi",default=DEFAULT_IMSI,help="IMSI") 
-    parser.add_option("-M", "--mcc", dest="mcc",default=DEFAULT_MCC,help="MCC of ePDG (3 digits)") 
-    parser.add_option("-N", "--mnc", dest="mnc",default=DEFAULT_MNC,help="MNC of ePDG (3 digits)")   
+    parser = build_parser()
+    options = parser.parse_args()
+    proposals = {}
+    if options.config:
+        try:
+            proposals = apply_file_config(options, argparse_defaults(parser), options.config)
+        except (OSError, ValueError, ImportError) as exc:
+            sys.stderr.write(str(exc) + '\n')
+            exit(1)
+    try:
+        options.log_level = normalize_log_level(options.log_level)
+        imei, imeisv = validate_device_identity(options.imei, options.imeisv)
+        validate_aka_credentials(options.imsi, options.ki, options.op, options.opc)
+        resolve_dpd_seconds(options.dpd, None)
+        resolve_keepalive_seconds(options.keepalive)
+        resolve_reconnect_attempts(options.reconnect)
+    except ValueError as exc:
+        sys.stderr.write(str(exc) + '\n')
+        exit(1)
+    setup_logging(options.log_level)
 
-    parser.add_option("-K", "--ki", dest="ki", help="ki for Milenage (if not using option -m)")    
-    parser.add_option("-P", "--op", dest="op", help="op for Milenage (if not using option -m)")    
-    parser.add_option("-C", "--opc", dest="opc", help="opc for Milenage (if not using option -m)") 
-    parser.add_option("-n", "--netns", dest="netns", help="Name of network namespace for tun device")  
-    parser.add_option("-S", "--sqn", dest="sqn", help="SQN (6 hex bytes)")        
-    
-    (options, args) = parser.parse_args()
-    
     try:
         destination_addr = socket.gethostbyname(options.destination_addr)
     except:
-        print('Unable to resolve ' + options.destination_addr + '. Exiting.')
+        sys.stderr.write('Unable to resolve ' + options.destination_addr + '. Exiting.\n')
         exit(1)
 
-    a = swu(options.source_addr,destination_addr,options.apn,options.modem,options.gateway_ip_address,options.mcc,options.mnc,options.imsi,options.ki,options.op,options.opc,options.netns, options.sqn)
+    a = swu(options.source_addr,destination_addr,options.apn,options.modem,options.gateway_ip_address,options.mcc,options.mnc,options.imsi,options.ki,options.op,options.opc,options.netns, options.sqn, options.no_default_route, options.no_dns, options.export_keys, options.headless, imei, imeisv, options.dpd, options.keepalive, options.reconnect)
 
-    if options.imsi == DEFAULT_IMSI: a.get_identity()
-    a.set_sa_list(sa_list)
-    a.set_sa_list_child(sa_list_child)
-    a.set_ts_list(TSI, ts_list_initiator)
-    a.set_ts_list(TSR, ts_list_responder)
-    a.set_cp_list(cp_list)
+    if options.imsi is None:
+        a.get_identity()
+    a.set_sa_list(proposals.get('ike_sa', sa_list))
+    a.set_sa_list_child(proposals.get('child_sa', sa_list_child))
+    a.set_ts_list(TSI, proposals.get('ts_initiator', ts_list_initiator))
+    a.set_ts_list(TSR, proposals.get('ts_responder', ts_list_responder))
+    a.set_cp_list(proposals.get('cp', cp_list))
     a.start_ike()
     
     

@@ -1,0 +1,15 @@
+# Lima instance for the Linux SWu client on macOS.
+# Start via ./run-lima.sh (adds a writable mount of this repo).
+minimumLimaVersion: "2.0.0"
+vmType: vz
+cpus: 2
+memory: "2GiB"
+disk: "20GiB"
+mountType: virtiofs
+containerd:
+  system: false
+  user: false
+networks:
+- vzNAT: true
+base:
+- template:_images/ubuntu-24.04

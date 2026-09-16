@@ -1,0 +1,12 @@
+# Provoke AUTS / SQN sync: any sqn makes the first EAP-AKA challenge send AUTS.
+# Expect: event=retry reason=SYNC_FAILURE, then a second challenge (CONNECTED if SQN is accepted).
+# Quote IMSI / Ki / OP / SQN so leading zeros survive YAML.
+dest: 192.168.64.1
+imsi: "001011234567890"
+ki: "000102030405060708090a0b0c0d0e0f"
+op: "00112233445566778899aabbccddeeff"
+sqn: "000000000001"
+no_default_route: true
+no_dns: true
+headless: true
+log_level: warning

@@ -1,0 +1,20 @@
+# Provoke NO_PROPOSAL_CHOSEN: only ENCR_DES, which a modern ePDG will not pick.
+# Expect: event=failed notify=NO_PROPOSAL_CHOSEN code=14
+# Quote IMSI / Ki / OP so leading zeros survive YAML.
+dest: 192.168.64.1
+imsi: "001011234567890"
+ki: "000102030405060708090a0b0c0d0e0f"
+op: "00112233445566778899aabbccddeeff"
+no_default_route: true
+no_dns: true
+headless: true
+log_level: warning
+
+ike_sa:
+  - protocol: IKE
+    spi_size: 0
+    transforms:
+      - {type: ENCR, id: ENCR_DES}
+      - {type: PRF, id: PRF_HMAC_SHA1}
+      - {type: INTEG, id: AUTH_HMAC_SHA1_96}
+      - {type: D_H, id: MODP_2048_bit}

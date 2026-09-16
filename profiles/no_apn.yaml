@@ -1,0 +1,12 @@
+# Provoke 3GPP 24.302 NO_APN_SUBSCRIPTION: APN is not provisioned.
+# Expect: event=failed notify=NO_APN_SUBSCRIPTION code=9002
+# Quote IMSI / Ki / OP so leading zeros survive YAML.
+dest: 192.168.64.1
+imsi: "001011234567890"
+ki: "000102030405060708090a0b0c0d0e0f"
+op: "00112233445566778899aabbccddeeff"
+apn: nosuch.apn
+no_default_route: true
+no_dns: true
+headless: true
+log_level: warning

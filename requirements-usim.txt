@@ -1,0 +1,2 @@
+pyscard
+git+https://github.com/mitshell/card.git
