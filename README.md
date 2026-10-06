@@ -428,3 +428,5 @@ ESP SA INFO (wireshark):
    - If the implementation does not expect a PAD LENGTH octet, this variable should be equal to 0.
    - If the implementation expects an octet for PAD LENGTH this variable should be equal to 1.
 
+# Update 4:
+- Added a dockerfile. To run, it may require the following flags `-p 500:500 -p 4500:4500 --cap-add=NET_RAW --cap-add=NET_ADMIN` in the `docker run` command, the smartcard reader's socket can be passed through with `--net=host --device /dev/net/tun -v /run/pcscd/pcscd.comm:/run/pcscd/pcscd.comm`
